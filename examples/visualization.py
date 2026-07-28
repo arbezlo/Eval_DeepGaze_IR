@@ -96,7 +96,7 @@ visualizer.compare_deepgaze_human_heatmaps(
     fixations_df=INFRARED_FIXATIONS_CSV,
     deepgaze_predictor=deepgaze_predictor,
     modality="infrared",
-    save_dir=OUTPUT_DIR / "deepgaze_human_comparison",
+    save_dir=OUTPUT_DIR / "deepgaze_human__infrared_comparison",
     channel_mode="auto",
     sigma=35.0,
     heatmap_alpha=0.45,

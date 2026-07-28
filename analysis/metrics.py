@@ -3,12 +3,11 @@ from __future__ import annotations
 from typing import Optional, Dict, Callable
 
 import numpy as np
-from scipy.stats import pearsonr, wasserstein_distance
+from scipy.stats import pearsonr
 from sklearn.metrics import roc_auc_score
 
 from helpers.models import RoiBox
 import numpy as np
-import ot  
 
 class Metrics:
     def __init__(self, epsilon: float = 1e-12) -> None:
@@ -17,21 +16,19 @@ class Metrics:
             "similarity": {
                 "cc": self.pearson_correlation,
                 "sim": self.sim,
-                "kl": self.kl_div,
-                # "emd": self.emd,
+                "kl": self.kl_div_oriented,
             },
             "predictivity": {
                 "nss": self.nss,
                 "auc_judd": self.auc_judd,
                 "ig": self.information_gain,
-                # "ll": self.log_likelihood,
             },
-            "roi": {
-                "mass": self.roi_mass,
-                "density": self.roi_density,
-                "ratio": self.roi_ratio,
-                "normalized_ratio": self.roi_normalized_ratio,
-            }
+            # "roi": {
+            #     "mass": self.roi_mass,
+            #     "density": self.roi_density,
+            #     "ratio": self.roi_ratio,
+            #     "normalized_ratio": self.roi_normalized_ratio,
+            # }
         }
 
     # ------------------------------------------------------------------
@@ -62,53 +59,14 @@ class Metrics:
     def sim(self, map_a: np.ndarray, map_b: np.ndarray) -> float:
         return float(np.minimum(self._as_density(map_a), self._as_density(map_b)).sum())
 
-    def kl_div_non_sym(self, reference: np.ndarray, prediction: np.ndarray) -> float:
+    def kl_div(self, reference: np.ndarray, prediction: np.ndarray) -> float:
         p, q = self._as_density(reference), self._as_density(prediction)
         return float(np.sum(p * np.log((p + self.epsilon) / (q + self.epsilon))))
     
-    def kl_div(
-        self,
-        map_a: np.ndarray,
-        map_b: np.ndarray,
-    ) -> float:
-        return 0.5 * (
-            self.kl_div_non_sym(map_a, map_b)
-            + self.kl_div_non_sym(map_b, map_a)
-        )
-    
- 
+    def kl_div_oriented(self, reference: np.ndarray, prediction: np.ndarray) -> float:
+        p, q = self._as_density(reference), self._as_density(prediction)
+        return -float(np.sum(p * np.log((p + self.epsilon) / (q + self.epsilon))))
 
-    def emd(self, map_a: np.ndarray, map_b: np.ndarray, n_projections: int = 50) -> float:
-        """
-        2D EMD approximated via Sliced Wasserstein Distance (SWD).
-        Basé sur l'approche de projection multidirectionnelle (Rabin et al. / Bonneel et al.).
-        """
-        a, b = self._as_density(map_a), self._as_density(map_b)
-        if a.shape != b.shape:
-            raise ValueError(f"Maps must have same shape, got {a.shape} vs {b.shape}")
-
-        h, w = a.shape
-        
-        # 1. Générer la grille de coordonnées 2D (Y, X)
-        y_coords, x_coords = np.mgrid[0:h, 0:w]
-        coordinates = np.vstack([x_coords.ravel(), y_coords.ravel()]).T.astype(np.float64)
-        
-        # 2. Aplatir les distributions de probabilités (poids)
-        weights_a = a.ravel()
-        weights_b = b.ravel()
-        
-        # 3. Calcul de la Sliced Wasserstein Distance via la bibliothèque POT
-        # Elle projette les points sur 'n_projections' directions aléatoires et résout en O(N log N)
-        swd_distance = ot.sliced_wasserstein_distance(
-            X_s=coordinates, 
-            X_t=coordinates, 
-            a=weights_a, 
-            b=weights_b, 
-            n_projections=n_projections,
-            seed=42 # Pour la reproductibilité
-        )
-        
-        return float(swd_distance)
 
     # ------------------------------------------------------------------
     # PREDICTIVITY METRICS

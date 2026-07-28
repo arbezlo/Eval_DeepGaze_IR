@@ -11,22 +11,6 @@ from helpers.models import Dataset, FixationData
 
 
 class Builder:
-    """
-    Construit les cartes spatiales à partir de fixations_df.csv.
-
-    Sorties générées :
-    - fixations_by_participant/<modality>/<image_stem>/<participant_id>.npy
-      Carte de fixation d'un participant pour une image.
-
-    - fixations_concat/<modality>/<image_name>.npy
-      Carte de fixation concaténée, obtenue par somme des cartes participants.
-
-    - saliencies/<modality>/<image_name>.npy
-      Carte de saillance lissée par noyau gaussien et normalisée en distribution
-      de probabilité, c.-à-d. somme = 1 si au moins une fixation existe.
-    """
-
-
 
     def build_fixation_map(
         self,
@@ -74,6 +58,22 @@ class Builder:
             fixation_map[y_img, x_img] += 1
 
         return fixation_map
+    
+    def build_participant_maps(
+        self,
+        data: Dataset,
+        stem: str | int,
+    ) -> dict[str, np.ndarray]:
+        stem_data = data[stem]
+
+        return {
+            participant_id: self.build_fixation_map(
+                data=data,
+                stem=stem,
+                participant_id=participant_id,
+            )
+            for participant_id in stem_data.participants_data
+        }
     
 
     @staticmethod

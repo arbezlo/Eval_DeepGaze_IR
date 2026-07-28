@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -9,8 +8,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from helpers.models import Results, Metadata
-from helpers.indexer import Indexer
+from helpers.models import Results
 
 
 class Saver:
@@ -19,200 +17,109 @@ class Saver:
         
     
 
-    def save_expe1_results(self, results: Results, output_dir: str = None) -> pd.DataFrame:
-        
-        output_dir = self.output_dir / "expe1" / "comparison" if output_dir is None else output_dir
-        expected_columns = [
-            "stem",
-            "daynight",
-            "metric_type",
-            "metric_name",
-            "vv",
-            "ii",
-            "vi",
-            "iv",
-            "intra",
-            "inter",
-            "delta",
-        ]
-
-        summary = self._save_results(
-            results=results,
-            output_dir=output_dir,
-            expected_columns=expected_columns,
-            summary_measures=["vv", "ii", "vi", "iv", "intra", "inter", "delta"],
+    def save_expe1_results(
+        self,
+        results: Results,
+        output_dir: str | Path | None = None,
+    ) -> pd.DataFrame:
+        output_dir = (
+            self.output_dir / "expe1" / "comparison"
+            if output_dir is None
+            else Path(output_dir)
         )
 
-        return summary
-
-    def save_expe2_results(self, results: Results, output_dir: str = None) -> pd.DataFrame:
-        
-        output_dir = self.output_dir / "expe2" / "comparison" if output_dir is None else output_dir
         expected_columns = [
             "stem",
-            "daynight",
             "metric_type",
             "metric_name",
-            "vv",
-            "ii",
-            "vd",
-            "id",
-            "delta_v",
-            "delta_i",
-            "delta",
+            "score_inter",
+            "score_perm_mean",
+            "score_perm_std",
+            "delta_perm_inter",
+            "p_value",
+            "n_permutations",
+            "n_visible",
+            "n_infrared",
+            "sigma",
         ]
 
-        summary = self._save_results(
+        return self._save_results(
             results=results,
             output_dir=output_dir,
             expected_columns=expected_columns,
             summary_measures=[
-                "vv",
-                "ii",
-                "vd",
-                "id",
-                "delta_v",
-                "delta_i",
-                "delta",
+                "score_inter",
+                "score_perm_mean",
+                "score_perm_std",
+                "delta_perm_inter",
             ],
         )
 
-        return summary
 
-    
+    def save_expe2_results(
+        self,
+        results: Results,
+        output_dir: str | Path | None = None,
+    ) -> pd.DataFrame:
+        output_dir = (
+            self.output_dir / "expe2" / "comparison"
+            if output_dir is None
+            else Path(output_dir)
+        )
+
+        expected_columns = [
+            "stem",
+            "metric_type",
+            "metric_name",
+            "score_rgb",
+            "score_ir",
+            "delta_rgb_ir",
+        ]
+
+        return self._save_results(
+            results=results,
+            output_dir=output_dir,
+            expected_columns=expected_columns,
+            summary_measures=[
+                "score_rgb",
+                "score_ir",
+                "delta_rgb_ir",
+            ],
+        )
+
+
     def save_expe1_analysis(
         self,
         analysis: Mapping[str, Any],
-        output_dir: str = None
-    ) -> dict[str, pd.DataFrame]:
-        
-        output_dir = self.output_dir / "expe2" / "statistics" if output_dir is None else output_dir
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        self._save_analysis_json(
-            analysis=analysis,
-            output_path=output_dir / "analysis.json",
+        output_dir: str | Path | None = None,
+    ) -> pd.DataFrame:
+        output_dir = (
+            self.output_dir / "expe1" / "statistics"
+            if output_dir is None
+            else Path(output_dir)
         )
 
-        saved_tables: dict[str, pd.DataFrame] = {}
+        return self._save_analysis(
+            analysis=analysis,
+            output_dir=output_dir,
+        )
 
-        for test_type, metric_results in analysis.items():
-            rows: list[dict[str, Any]] = []
 
-            if not isinstance(metric_results, Mapping):
-                continue
-
-            for metric_key, test_result in metric_results.items():
-                if not isinstance(test_result, Mapping):
-                    continue
-
-                row = {
-                    "metric_type": test_result.get("metric_type"),
-                    "metric_name": test_result.get(
-                        "metric_name",
-                        str(metric_key),
-                    ),
-                    "test_type": str(test_type),
-                    "test_name": test_result.get(
-                        "test",
-                        test_result.get("test_name"),
-                    ),
-                }
-
-                for key, value in test_result.items():
-                    if key in {
-                        "metric_type",
-                        "metric_name",
-                        "test",
-                        "test_name",
-                    }:
-                        continue
-
-                    row[str(key)] = self._to_csv_value(value)
-
-                rows.append(row)
-
-            table = self._build_analysis_dataframe(
-                rows,
-                additional_first_columns=["test_type"],
-            )
-
-            table.to_csv(
-                output_dir / f"{test_type}.csv",
-                index=False,
-            )
-
-            saved_tables[str(test_type)] = table
-
-        return saved_tables
-    
     def save_expe2_analysis(
         self,
         analysis: Mapping[str, Any],
-        output_dir: str = None
-    ) -> dict[str, pd.DataFrame]:
-        """
-        Sauvegarde un fichier CSV par famille de tests DeepGaze.
-        """
-        output_dir = self.output_dir / "expe2" / "statistics" if output_dir is None else output_dir
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        self._save_analysis_json(
-            analysis=analysis,
-            output_path=output_dir / "analysis.json",
+        output_dir: str | Path | None = None,
+    ) -> pd.DataFrame:
+        output_dir = (
+            self.output_dir / "expe2" / "statistics"
+            if output_dir is None
+            else Path(output_dir)
         )
 
-        saved_tables: dict[str, pd.DataFrame] = {}
-
-        for test_type, metric_results in analysis.items():
-            rows: list[dict[str, Any]] = []
-
-            if not isinstance(metric_results, Mapping):
-                continue
-
-            for metric_key, test_result in metric_results.items():
-                if not isinstance(test_result, Mapping):
-                    continue
-
-                row = {
-                    "metric_type": test_result.get("metric_type"),
-                    "metric_name": test_result.get(
-                        "metric_name",
-                        str(metric_key),
-                    ),
-                    "test_type": str(test_type),
-                    "test_name": test_result.get(
-                        "test",
-                        test_result.get("test_name"),
-                    ),
-                }
-
-                for key, value in test_result.items():
-                    if key in {
-                        "metric_type",
-                        "metric_name",
-                        "test",
-                        "test_name",
-                    }:
-                        continue
-
-                    row[str(key)] = self._to_csv_value(value)
-
-                rows.append(row)
-
-            table = self._build_analysis_dataframe(
-                rows,
-                additional_first_columns=["test_type"],
-            )
-
-            table.to_csv(
-                output_dir / f"{test_type}.csv",
-                index=False,
-            )
-
-            saved_tables[str(test_type)] = table
-
-        return saved_tables
+        return self._save_analysis(
+            analysis=analysis,
+            output_dir=output_dir,
+        )
 
     def _save_analysis_json(
         self,
@@ -235,77 +142,6 @@ class Saver:
                 indent=2,
                 allow_nan=False,
             )
-
-
-    def _analysis_result_to_row(
-        self,
-        metric_type: str,
-        metric_name: str,
-        result: Mapping[str, Any],
-        default_test_name: str,
-    ) -> dict[str, Any]:
-        """
-        Transforme le dictionnaire produit par run_ttest en une ligne CSV.
-        """
-        test_name = result.get(
-            "test_name",
-            result.get("test", default_test_name),
-        )
-
-        row: dict[str, Any] = {
-            "metric_type": metric_type,
-            "metric_name": metric_name,
-            "test_name": str(test_name),
-        }
-
-        for key, value in result.items():
-            # La valeur est déjà copiée dans test_name.
-            if key in {"test", "test_name"}:
-                continue
-
-            row[str(key)] = self._to_csv_value(value)
-
-        return row
-
-
-    def _build_analysis_dataframe(
-        self,
-        rows: list[dict[str, Any]],
-        additional_first_columns: list[str] | None = None,
-    ) -> pd.DataFrame:
-        """
-        Construit le DataFrame et place les colonnes d'identification en premier.
-        """
-        first_columns = [
-            "metric_type",
-            "metric_name",
-        ]
-
-        if additional_first_columns:
-            first_columns.extend(additional_first_columns)
-
-        first_columns.append("test_name")
-
-        if not rows:
-            return pd.DataFrame(columns=first_columns)
-
-        table = pd.DataFrame(rows)
-
-        existing_first_columns = [
-            column
-            for column in first_columns
-            if column in table.columns
-        ]
-
-        remaining_columns = [
-            column
-            for column in table.columns
-            if column not in existing_first_columns
-        ]
-
-        return table[
-            existing_first_columns + remaining_columns
-        ]
 
 
     def _to_csv_value(self, value: Any) -> Any:
@@ -484,3 +320,72 @@ class Saver:
         if values.dropna().empty:
             return float("nan")
         return float(values.mean())
+    
+    
+    def _save_analysis(
+        self,
+        analysis: Mapping[str, Any],
+        output_dir: Path,
+    ) -> pd.DataFrame:
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        self._save_analysis_json(
+            analysis=analysis,
+            output_path=output_dir / "analysis.json",
+        )
+
+        rows: list[dict[str, Any]] = []
+
+        for metric_key, result in analysis.items():
+            if not isinstance(result, Mapping):
+                continue
+
+            row = {
+                "metric_key": str(metric_key),
+                "metric_type": result.get("metric_type"),
+                "metric_name": result.get("metric_name"),
+                "test_name": result.get(
+                    "test",
+                    result.get("test_name"),
+                ),
+            }
+
+            for key, value in result.items():
+                if key in {
+                    "metric_type",
+                    "metric_name",
+                    "test",
+                    "test_name",
+                }:
+                    continue
+
+                row[str(key)] = self._to_csv_value(value)
+
+            rows.append(row)
+
+        table = pd.DataFrame(rows)
+
+        first_columns = [
+            "metric_key",
+            "metric_type",
+            "metric_name",
+            "test_name",
+        ]
+
+        if table.empty:
+            table = pd.DataFrame(columns=first_columns)
+        else:
+            remaining_columns = [
+                column
+                for column in table.columns
+                if column not in first_columns
+            ]
+
+            table = table[first_columns + remaining_columns]
+
+        table.to_csv(
+            output_dir / "analysis.csv",
+            index=False,
+        )
+
+        return table

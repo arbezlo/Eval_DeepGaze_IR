@@ -1,25 +1,10 @@
-# Expérience d’oculométrie
+# Eye-Tracking Experiment
 
-Ce dossier contient le code nécessaire à l’exécution de l’expérience d’oculométrie en vision libre. L’expérience présente des stimuli visuels ou infrarouges avec PsychoPy, enregistre les données du regard avec un système EyeLink et produit un fichier EDF par session.
+This directory contains the PsychoPy and EyeLink acquisition script used for the free-viewing RGB and LWIR experiment.
 
-Le protocole sélectionne automatiquement les stimuli associés au participant, conserve le ratio d’aspect des images, randomise leur ordre de manière reproductible et ajoute dans le fichier EDF les informations nécessaires pour un traitement ultérieur.
+The script assigns each participant to a predefined stimulus subset, presents the corresponding images in a reproducible random order, records gaze data, and stores one EDF file per session.
 
-## 1. Fonctionnalités principales
-
-- sélection des stimuli correspondant à l'id du participant ;
-- présentation des stimuli après redimensionnement en plein écran avec PsychoPy ;
-- ordre des stimuli déterministe pour chaque participant ;
-- acquisition EyeLink des fixations du regard ;
-- prise en charge des modalités visible et infrarouge ;
-- croix de fixation centrale d’une durée aléatoire comprise entre 0,8 et 1,2 seconde ;
-- présentation de chaque image pendant 3 secondes ;
-- redimensionnement des stimuli sans déformation dans une zone maximale configurable ;
-- calibration initiale, correction de dérive périodique et recalibration complète périodique ;
-- création automatique d’un dossier de résultats par session ;
-- messages EyeLink structurés pour faciliter l’extraction et la reprojection des données ;
-
-
-## 2. Organisation du dossier
+## Structure
 
 ```text
 eyetracking/
@@ -39,44 +24,49 @@ eyetracking/
     └── infrared/
 ```
 
-Après une session, les résultats sont enregistrés dans un dossier de la forme :
+## Main Features
 
-```text
-results/<modalite>/<participant>_<date>_<heure>/
-└── ID-<participant>-<date>_<heure>.EDF
+- participant-specific subset selection;
+- support for RGB and LWIR stimuli;
+- deterministic stimulus shuffling for each participant;
+- fixed three-second image presentation;
+- random central fixation period between 0.8 and 1.2 seconds;
+- aspect-ratio-preserving image resizing;
+- automatic screen-resolution detection;
+- initial calibration and periodic recalibration;
+- parser-compatible EyeLink messages;
+- automatic EDF transfer to a modality-specific result directory;
+- optional dummy and test modes.
+
+## Requirements
+
+- Python;
+- PsychoPy;
+- pandas;
+- Pillow;
+- PyLink and the EyeLink Developers Kit;
+- `src/EyeLinkCoreGraphicsPsychoPy.py`.
+
+## Configuration
+
+The main parameters are defined at the beginning of `main.py`.
+
+```python
+DUMMY_MODE = True
+FULL_SCREEN = True
+TEST_MODE = False
+
+STIMULUS_MAX_SIZE = (1200, 800)
+
+IMG_TIME = 3.0
+FIXATION_MIN_TIME = 0.8
+FIXATION_MAX_TIME = 1.2
+
+CENTRAL_RECALIBRATION_EVERY = 25
+FULL_RECALIBRATION_EVERY = 50
 ```
 
-En mode de test, les entrées sont recherchées dans `test/tables/` et `test/stimuli/`, tandis que les sorties sont enregistrées dans `results/test/<modalite>/`.
-
-## 3. Prérequis
-
-L’exécution nécessite :
-
-- Python ;
-- PsychoPy ;
-- Pandas ;
-- Pillow ;
-- PyLink et les composants du EyeLink Developers Kit ;
-- le module `EyeLinkCoreGraphicsPsychoPy.py` ;
-
-## 4. Configuration
-
-Les principaux paramètres sont définis au début de `main.py`.
-
-- `DUMMY_MODE` : Utilise une connexion EyeLink simulée. 
-- `FULL_SCREEN` : Ouvre la fenêtre PsychoPy en plein écran.
-- `TEST_MODE` : Effectue l'expérience en mode Test en utilisant les dossiers consacrés.
-- `STIMULUS_MAX_SIZE` : Zone maximale d’affichage d’un stimulus, en pixels.
-- `IMG_TIME` : Durée d’affichage d’une image, en secondes.
-- `FIXATION_MIN_TIME` : Durée minimale de la croix de fixation.
-- `FIXATION_MAX_TIME` : Durée maximale de la croix de fixation.
-- `CENTRAL_RECALIBRATION_EVERY`: Correction centrale après chaque bloc de 25 images.
-- `FULL_RECALIBRATION_EVERY`: Recalibration complète après chaque bloc de 50 images.
-- `HOST_IP` | `100: Adresse IP du poste EyeLink Host.
-- `MONITOR_WIDTH_CM` |: Largeur physique du moniteur.
-- `MONITOR_DISTANCE_CM` : Distance entre le participant et le moniteur.
-
-Pour effectuer une acquisition réelle, il faut au minimum vérifier au minimum :
+For a real acquisition session:
 
 ```python
 DUMMY_MODE = False
@@ -84,113 +74,131 @@ FULL_SCREEN = True
 TEST_MODE = False
 ```
 
-La largeur du moniteur et la distance d’observation doivent correspondre à l’installation expérimentale. La résolution de l’écran est détectée automatiquement au démarrage.
+The monitor geometry must match the experimental setup:
 
-## 5. Tables d’entrée
+```python
+MONITOR_WIDTH_CM = 53.5
+MONITOR_DISTANCE_CM = 70.0
+```
 
-Le dossier contient des fichiers `csv` qui ont différents rôles.
+The screen resolution is detected automatically at runtime.
 
-#### `participants.csv`
+## Input Tables
 
-Cette table associe chaque participant à un sous-ensemble de stimuli.
+### `participants.csv`
 
-Colonnes requises :
+This table assigns each participant to a stimulus subset.
 
-| Colonne | Description |
+Required columns:
+
+| Column | Description |
 |---|---|
-| `id` | Identifiant saisi au lancement de l’expérience. |
-| `subset` | Sous-ensemble attribué au participant, par exemple `A`, `B` ou `C`. |
+| `id` | Participant identifier entered at startup. |
+| `subset` | Assigned subset, such as `A`, `B`, or `C`. |
 
-Exemple :
+Example:
 
 ```csv
-id;subset
-1;A
-2;B
-3;C
+id,subset
+1,A
+2,B
+3,C
 ```
 
-#### `metadata.csv`
+### `metadata.csv`
 
-Cette table décrit les stimuli et leur répartition entre les sous-ensembles.
+This table describes the stimuli assigned to each subset.
 
-Colonnes actuellement présentes :
+Required columns:
 
-| Colonne | Utilisation |
+| Column | Description |
 |---|---|
-| `image` | Nom du fichier image affiché et nom transmis au pipeline de traitement. |
-| `modality` | Modalité du stimulus. |
-| `subset` | Sous-ensemble auquel appartient l’image. |
-| `unique_label` | Annotation sémantique ; non utilisée par le script d’acquisition actuel. |
-| `multi_labels` | Annotations multiples ; non utilisées par le script d’acquisition actuel. |
-| `description` | Description textuelle ; non utilisée par le script d’acquisition actuel. |
+| `subset` | Stimulus subset. |
+| `modality` | RGB/visible or IR/infrared modality. |
+| `image` | Image filename used when no alternative display column is provided. |
 
 
-Chaque sous-ensemble doit contenir une seule modalité. Les fichiers doivent être présents dans :
+Each subset must contain a single modality. Stimulus files must be stored in:
 
 ```text
-- stimuli/visible/
-- stimuli/infrared/
+stimuli/visible/
+stimuli/infrared/
 ```
 
+## Running the Experiment
 
-## 6. Lancement de l’expérience
-
-Depuis le dossier `eyetracking/`, exécuter :
+From the `eyetracking` directory:
 
 ```bash
 python main.py
 ```
 
-Le déroulement est le suivant :
+Execution order:
 
-1. saisie de l’identifiant du participant ;
-2. recherche du sous-ensemble dans `participants.csv` ;
-3. chargement des stimuli correspondants depuis `metadata.csv` ;
-5. randomisation déterministe de l’ordre des essais ;
-6. ouverture de la fenêtre PsychoPy ;
-7. calibration initiale en acquisition ;
-8. exécution des essais ;
-9. transfert du fichier EDF dans le dossier de résultats.
+1. enter the participant identifier;
+2. load the corresponding subset;
+3. determine the subset modality;
+4. validate and load the stimulus files;
+5. shuffle trials reproducibly;
+6. initialize PsychoPy and EyeLink;
+7. perform the initial calibration;
+8. present all trials;
+9. transfer the EDF file to the local results directory.
 
+## Trial Procedure
 
-## 7. Déroulement d’un essai
+For each trial:
 
-Pour chaque stimulus :
+1. the stimulus is resized without changing its aspect ratio;
+2. EyeLink recording starts;
+3. a central fixation cross is displayed;
+4. the image is shown for three seconds;
+5. trial and stimulus metadata are written to the EDF file;
+6. recording stops and the trial result is stored.
 
-1. l’image est chargée et redimensionnée en conservant son ratio d’aspect ;
-2. sa géométrie est exprimée dans les coordonnées complètes de l’écran ;
-3. l’image est envoyée comme fond au poste EyeLink Host ;
-4. l’enregistrement EyeLink démarre ;
-5. une croix de fixation centrale est affichée pendant une durée aléatoire ;
-6. le stimulus est présenté pendant 3 secondes ;
-7. des messages décrivant l’essai et la géométrie du stimulus sont écrits dans l’EDF ;
-8. l’écran est effacé et l’enregistrement de l’essai est arrêté.
+A central drift-correction block is scheduled every 25 images, and a full recalibration every 50 images.
 
-La taille maximale d’affichage est limitée par `STIMULUS_MAX_SIZE`, sans dépasser la résolution réelle de l’écran.
+## EyeLink Messages
 
-## 8. Messages enregistrés dans l’EDF
-
-Le script écrit notamment les messages suivants :
+The acquisition script records the messages required by the processing pipeline, including:
 
 ```text
+DISPLAY_COORDS
 TRIALID
 NUM_IMAGE
 Affichage_Image
+!V TRIAL_VAR name
+!V TRIAL_VAR modality
+!V TRIAL_VAR stimulus_width
+!V TRIAL_VAR stimulus_height
 image_onset
 time_out
 blank_screen
 TRIAL_RESULT
-DISPLAY_COORDS
 ```
 
-Il enregistre également des variables Data Viewer relatives :
+These messages allow the processing pipeline to recover trial boundaries, stimulus names, display dimensions, and gaze coordinates.
 
-- au nom de l’image ;
-- à la modalité ;
-- à la largeur affichée ;
-- à la hauteur affichée ;
-- au rectangle occupé par l’image sur l’écran.
+## Output
 
-Ces informations permettent de replacer les coordonnées du regard dans l’espace propre au stimulus pendant le traitement.
+Each session is stored under:
 
+```text
+results/<modality>/<participant>_<date>_<time>/
+└── ID-<participant>-<date>_<time>.EDF
+```
+
+For example:
+
+```text
+results/infrared/12_2026_07_27_14_30/
+└── ID-012-2026_07_27_14_30.EDF
+```
+
+When `TEST_MODE=True`, the script uses:
+
+```text
+test/tables/
+test/stimuli/
+results/test/
+```
