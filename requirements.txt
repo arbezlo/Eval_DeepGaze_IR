@@ -1,0 +1,52 @@
+# DeepGazeIR — global project dependencies
+# Recommended Python version: 3.10 or 3.11
+
+# Core scientific stack
+numpy>=1.24,<2.1
+scipy>=1.10,<1.15
+pandas>=2.0,<2.3
+
+# Deep learning and computer vision
+torch>=2.1,<2.6
+torchvision>=0.16,<0.21
+timm>=0.9,<1.1
+Pillow>=10.0,<12.0
+opencv-python>=4.8,<5.0
+scikit-image>=0.21,<0.25
+
+# Saliency and probabilistic modelling
+pysaliency>=0.2,<0.3
+imageio>=2.31,<3.0
+h5py>=3.9,<4.0
+
+# Eye-tracking data processing
+openpyxl>=3.1,<4.0
+pyarrow>=14,<20
+
+# Statistical analysis
+scikit-learn>=1.3,<1.7
+statsmodels>=0.14,<0.15
+pingouin>=0.5.4,<0.6
+
+# Visualisation
+matplotlib>=3.7,<3.10
+tqdm>=4.66,<5.0
+
+# Experiment and configuration utilities
+PyYAML>=6.0,<7.0
+python-dotenv>=1.0,<2.0
+
+# BIDS dataset construction and validation
+pybids>=0.16,<0.19
+bidsschematools>=0.10,<2.0
+
+# Notebooks
+jupyterlab>=4.0,<5.0
+ipykernel>=6.25,<7.0
+ipywidgets>=8.1,<9.0
+
+# Code quality and tests
+pytest>=7.4,<9.0
+ruff>=0.5,<1.0
+black>=24.0,<26.0
+mypy>=1.8,<2.0
