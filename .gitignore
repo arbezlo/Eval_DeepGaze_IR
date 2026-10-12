@@ -5,9 +5,12 @@ __pycache__/
 outputs/
 deepgaze/
 data/
+DATA_OCCULO_2026/
+DG/
 
 # Files
 TODO.md
+DATA_OCCULO.zip
 
 # Extension
 *.png

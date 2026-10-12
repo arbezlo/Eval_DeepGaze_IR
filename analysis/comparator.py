@@ -124,100 +124,30 @@ class Comparator:
 
         return scores
     
-    def _compute_permutation_scores(
-        self,
-        data_visible: Dataset,
-        data_infrared: Dataset,
-        stem: str | int,
-        sigma: float,
-        n_permutations: int = 1000,
-        seed: int | None = 42,
-    ) -> dict[str, dict[str, np.ndarray]]:
-        
-        visible_maps = self.builder.build_participant_maps(
-            data_visible,
-            stem,
-        )
-        infrared_maps = self.builder.build_participant_maps(
-            data_infrared,
-            stem,
-        )
-
-        all_maps = (
-            list(visible_maps.values())
-            + list(infrared_maps.values())
-        )
-
-        n_visible = len(visible_maps)
-        n_infrared = len(infrared_maps)
-
-        if n_visible == 0 or n_infrared == 0:
-            raise ValueError(
-                f"No participant data available for stem '{stem}'."
-            )
-
-        rng = np.random.default_rng(seed)
-
-        permutation_scores = {
-            metric_type: {
-                metric_name: np.empty(n_permutations, dtype=float)
-                for metric_name in self.metrics.registry[metric_type]
-            }
-            for metric_type in ("similarity", "predictivity")
-        }
-
-        for permutation_index in range(n_permutations):
-            indices = rng.permutation(len(all_maps))
-
-            visible_indices = indices[:n_visible]
-            infrared_indices = indices[
-                n_visible:n_visible + n_infrared
-            ]
-
-            fixation_map_group_1 = self.builder.aggregate_fixation_maps(
-                [all_maps[index] for index in visible_indices]
-            )
-            fixation_map_group_2 = self.builder.aggregate_fixation_maps(
-                [all_maps[index] for index in infrared_indices]
-            )
-
-            scores = self._compute_human_scores(
-                fixation_map_group_1,
-                fixation_map_group_2,
-                sigma
-            )
-
-            for metric_type, metric_values in scores.items():
-                for metric_name, value in metric_values.items():
-                    permutation_scores[metric_type][metric_name][
-                        permutation_index
-                    ] = value
-
-        return permutation_scores
+   
     
-    def _permutation_p_value(
-        self,
-        observed_score: float,
-        permutation_scores: np.ndarray,
-        metric_name: str,
-    ) -> float:
-        valid_scores = permutation_scores[
-            np.isfinite(permutation_scores)
-        ]
+    # def _permutation_p_value(
+    #     self,
+    #     observed_score: float,
+    #     permutation_scores: np.ndarray,
+    #     metric_name: str,
+    # ) -> float:
+    #     valid_scores = permutation_scores[
+    #         np.isfinite(permutation_scores)
+    #     ]
 
-        if valid_scores.size == 0 or not np.isfinite(observed_score):
-            return float("nan")
+    #     if valid_scores.size == 0 or not np.isfinite(observed_score):
+    #         return float("nan")
 
         
-        extreme_count = np.sum(valid_scores <= observed_score)
+    #     extreme_count = np.sum(valid_scores <= observed_score)
 
-        return float(
-            (extreme_count + 1) / (valid_scores.size + 1)
-        )
-
+    #     return float(
+    #         (extreme_count + 1) / (valid_scores.size + 1)
+    #     )
     
     
-    def run_expe1(
+    def run_expe1_old(
         self,
         infrared_df: pd.DataFrame,
         visible_df: pd.DataFrame,
@@ -227,7 +157,76 @@ class Comparator:
         data_infrared = self.loader.load_dataset(infrared_df)
         data_visible = self.loader.load_dataset(visible_df)
 
-        stems = self._get_stems(infrared_df, visible_df)
+        def _compute_permutation_scores_old(
+            data_visible: Dataset,
+            data_infrared: Dataset,
+            stem: str | int,
+            sigma: float,
+            n_permutations: int = 1000,
+            seed: int | None = 42,
+            ) -> dict[str, dict[str, np.ndarray]]:
+            
+            visible_maps = self.builder.build_participant_maps(
+                data_visible,
+                stem,
+            )
+            infrared_maps = self.builder.build_participant_maps(
+                data_infrared,
+                stem,
+            )
+
+            all_maps = (
+                list(visible_maps.values())
+                + list(infrared_maps.values())
+            )
+
+            n_visible = len(visible_maps)
+            n_infrared = len(infrared_maps)
+
+            if n_visible == 0 or n_infrared == 0:
+                raise ValueError(
+                    f"No participant data available for stem '{stem}'."
+                )
+
+            rng = np.random.default_rng(seed)
+
+            permutation_scores = {
+                metric_type: {
+                    metric_name: np.empty(n_permutations, dtype=float)
+                    for metric_name in self.metrics.registry[metric_type]
+                }
+                for metric_type in ("similarity", "predictivity")
+            }
+
+            for permutation_index in range(n_permutations):
+                indices = rng.permutation(len(all_maps))
+
+                visible_indices = indices[:n_visible] # regroups N_visibles maps indifferently IR/RGB
+                infrared_indices = indices[n_visible:n_visible + n_infrared] #regroups the rest of the maps indifferently from IR/RGB
+                
+                #Build a fixation map from the selected fixation maps
+                fixation_map_group_1 = self.builder.aggregate_fixation_maps(
+                    [all_maps[index] for index in visible_indices]
+                )
+                fixation_map_group_2 = self.builder.aggregate_fixation_maps(
+                    [all_maps[index] for index in infrared_indices]
+                )
+                #Build a fixation map from the selected fixation maps
+                scores = self._compute_human_scores(
+                    fixation_map_group_1,
+                    fixation_map_group_2,
+                    sigma
+                )
+
+                for metric_type, metric_values in scores.items():
+                    for metric_name, value in metric_values.items():
+                        permutation_scores[metric_type][metric_name][
+                            permutation_index
+                        ] = value
+
+            return permutation_scores
+
+        stems = self._get_stems(infrared_df, visible_df) #1 stem = 1 scene
         dimensions = self._get_dimensions(infrared_df, visible_df)
         results: Results = {
             metric_type: {
@@ -240,7 +239,8 @@ class Comparator:
             for metric_type in ("similarity", "predictivity")
         }
 
-        for stem in tqdm(stems, desc="Running human-human analysis"):
+        for stem in tqdm(stems, desc="Running human-human analysis"): # iter over scenes 
+            #Compute the Fixations maps for all observations of RGB and LWIR
             visible_maps = self.builder.build_participant_maps(data_visible, stem)
             infrared_maps = self.builder.build_participant_maps(data_infrared, stem)
             fixation_map_v = self.builder.aggregate_fixation_maps(list(visible_maps.values()))
@@ -250,8 +250,11 @@ class Comparator:
             image_width = dimensions[stem]["image_width"]
             sigma = self._compute_sigma(self.sigma_deg, stimuli_width, image_width)
             
+            #Compute the Agreement (inter modality score) 
             inter_scores = self._compute_human_scores(fixation_map_v, fixation_map_i, sigma)
-            permutation_scores = self._compute_permutation_scores(
+            
+            #Compute the intra-modality score
+            permutation_scores = _compute_permutation_scores_old(
                 data_visible=data_visible,
                 data_infrared=data_infrared,
                 stem=stem,
@@ -279,6 +282,222 @@ class Comparator:
                         "n_infrared": len(infrared_maps),
                         "sigma": float(sigma),
                     }
+
+        return results
+
+    def _compute_permutation_scores(
+    self,
+    data_visible: Dataset,
+    data_infrared: Dataset,
+    stem: str | int,
+    sigma: float,
+    n_permutations: int = 1000,
+    seed: int | None = 42,
+    ) -> dict[str, dict[str, np.ndarray]]:
+        
+        def compute_inter_score(vis_g1,vis_g2, ir_g1,ir_g2, sigma):
+                inter_1 = self._compute_human_scores(vis_g1, ir_g1, sigma)
+                inter_2 = self._compute_human_scores(vis_g2, ir_g2, sigma)
+                inter_3 = self._compute_human_scores(vis_g1, ir_g2, sigma)
+                inter_4 = self._compute_human_scores(vis_g2, ir_g2, sigma)
+                
+                inter_score = {
+                        metric_type: {
+                            metric_name: np.empty(1, dtype=float)
+                            for metric_name in self.metrics.registry[metric_type]
+                        }
+                        for metric_type in ("similarity", "predictivity")
+                    }
+            
+                for metric_type in ("similarity", "predictivity"):
+                    for metric_name in self.metrics.registry[metric_type]:
+                        i1 = inter_1[metric_type][metric_name]
+                        i2 = inter_2[metric_type][metric_name]
+                        i3 = inter_3[metric_type][metric_name]
+                        i4 = inter_4[metric_type][metric_name]
+
+                        inter_score[metric_type][metric_name] = (1/4)*(i1+i2+i3+i4)
+                
+                return inter_score
+        
+        
+        visible_maps = self.builder.build_participant_maps(
+            data_visible,
+            stem,
+        )
+        infrared_maps = self.builder.build_participant_maps(
+            data_infrared,
+            stem,
+        )
+
+        infrared_maps = list(infrared_maps.values())
+        visible_maps = list(visible_maps.values())
+        # all_maps = (
+        #     list(visible_maps.values())
+        #     + list(infrared_maps.values())
+        # )
+
+        n_visible = len(visible_maps)
+        n_infrared = len(infrared_maps)
+
+        if n_visible == 0 or n_infrared == 0:
+            raise ValueError(
+                f"No participant data available for stem '{stem}'."
+            )
+
+        n = int(min((np.floor(n_visible/2),np.floor(n_infrared/2))))
+
+        rng = np.random.default_rng(seed)
+
+        permutations_scores = {
+                modality : {
+                    metric_type: {
+                    metric_name: np.empty(n_permutations, dtype=float)
+                    for metric_name in self.metrics.registry[metric_type]
+                    }
+                for metric_type in ("similarity", "predictivity")
+                }
+            for modality in ('VIS','IR')
+        }
+
+     
+
+        for permutation_index in range(n_permutations):
+            visible_indices = rng.permutation(n_visible)
+            infrared_indices = rng.permutation(n_infrared)
+            
+            visible_indices_1, visible_indices_2 = visible_indices[:n], visible_indices[n:n+n] 
+            infrared_indices_1, infrared_indices_2 = infrared_indices[:n], infrared_indices[n:n+n] 
+            
+            #Sanity check for the following test
+            assert(set(visible_indices_1).isdisjoint(set(visible_indices_2)))
+            assert(set(infrared_indices_1).isdisjoint(set(infrared_indices_2)))
+
+            #Build fixation maps from the selected participant's observations
+            visible_fixation_map_group_1 = self.builder.aggregate_fixation_maps(
+                [visible_maps[index] for index in visible_indices_1]
+            ) 
+            visible_fixation_map_group_2 = self.builder.aggregate_fixation_maps(
+                [visible_maps[index] for index in visible_indices_2]
+            ) 
+
+            infrared_fixation_map_group_1 = self.builder.aggregate_fixation_maps(
+                [infrared_maps[index] for index in infrared_indices_1]
+            )
+
+            infrared_fixation_map_group_2 = self.builder.aggregate_fixation_maps(
+                [infrared_maps[index] for index in infrared_indices_2]
+            )
+            
+            
+
+            #Compute the score between those maps
+            intra_RGB_scores = self._compute_human_scores(
+                visible_fixation_map_group_1,
+                visible_fixation_map_group_2,
+                sigma
+            )
+            intra_IR_scores = self._compute_human_scores(
+                infrared_fixation_map_group_1,
+                infrared_fixation_map_group_2,
+                sigma
+            )
+
+            
+
+            #Compute the inter scores
+            inter_score = compute_inter_score(visible_fixation_map_group_1,
+                                              visible_fixation_map_group_2,
+                                              infrared_fixation_map_group_1,
+                                              infrared_fixation_map_group_2,
+                                              sigma)
+
+            #compute the intra scores
+            visible_intra_score = self._compute_human_scores(visible_fixation_map_group_1, visible_fixation_map_group_2, sigma)
+            infrared_intra_score = self._compute_human_scores(infrared_fixation_map_group_1, infrared_fixation_map_group_2, sigma)
+
+
+            #Logs the score for test computation
+            for metric_type in ("similarity", "predictivity"):
+                for metric_name in self.metrics.registry[metric_type]:
+                    
+                    inter_value = inter_score[metric_type][metric_name]
+                    visible_intra_value = visible_intra_score[metric_type][metric_name]
+                    infrared_intra_value = infrared_intra_score[metric_type][metric_name] 
+
+                    delta_rgb = visible_intra_value - inter_value
+                    delta_ir = infrared_intra_value - inter_value
+
+
+                    permutations_scores['VIS'][metric_type][metric_name][permutation_index] = delta_rgb
+                    permutations_scores['IR'][metric_type][metric_name][permutation_index] = delta_ir
+
+
+        return permutations_scores
+
+    def run_expe1(
+        self,
+        infrared_df: pd.DataFrame,
+        visible_df: pd.DataFrame,
+        n_permutations: int = 1000,
+        seed: int | None = 42,
+    ) -> Results:
+        data_infrared = self.loader.load_dataset(infrared_df)
+        data_visible = self.loader.load_dataset(visible_df)
+
+        stems = self._get_stems(infrared_df, visible_df) #1 stem = 1 scene
+        dimensions = self._get_dimensions(infrared_df, visible_df)
+        results: Results = {
+            modality : {
+                metric_type: {
+                    metric_name: {
+                        stem: None
+                        for stem in stems
+                    }
+                    for metric_name in self.metrics.registry[metric_type]
+                }
+                for metric_type in ("similarity", "predictivity")
+            } 
+            for modality in ("VIS","IR")
+        }
+
+        for stem in tqdm(stems, desc="Running human-human analysis"): # iter over scenes 
+            #Define the number of images to use for computations in the permutations  
+            visible_user = len(self.builder.build_participant_maps(data_visible, stem).keys())
+            infrared_user = len(self.builder.build_participant_maps(data_infrared, stem).keys())
+            
+            N = int(min(np.floor(visible_user/2),np.floor(infrared_user/2)))
+
+            #Construct the blurring kernel associated to the current scene
+            stimuli_width = dimensions[stem]["stimuli_width"]
+            image_width = dimensions[stem]["image_width"]
+            sigma = self._compute_sigma(self.sigma_deg, stimuli_width, image_width)
+            
+            
+            #Compute the intra-modality score
+            permutation_scores = self._compute_permutation_scores(
+                data_visible=data_visible,
+                data_infrared=data_infrared,
+                stem=stem,
+                sigma=sigma,
+                n_permutations=n_permutations,
+                seed=seed,
+            )
+            
+            for modality in ("VIS", "IR"):
+                for metric_type in ("similarity", "predictivity"):
+                    for metric_name in self.metrics.registry[metric_type]:
+                        
+                        perm_scores = permutation_scores[modality][metric_type][metric_name]
+                        
+                        results[modality][metric_type][metric_name][stem] = {
+                            "score_perm_mean": float(np.nanmean(perm_scores)),
+                            "score_perm_std": float(np.nanstd(perm_scores)),
+                            "n_permutations": n_permutations,
+                            "sigma": float(sigma),
+                            "N_fix_maps": N,
+                
+                        }
 
         return results
 

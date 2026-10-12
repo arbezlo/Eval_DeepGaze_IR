@@ -1,0 +1,13 @@
+numpy
+pandas
+scipy
+scikit-learn
+pingouin
+tqdm
+opencv-python
+torch
+matplotlib
+jupyter
+pillow
+psychopy
+git+https://github.com/matthias-k/DeepGaze.git

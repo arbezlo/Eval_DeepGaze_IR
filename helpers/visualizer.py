@@ -95,7 +95,7 @@ class Visualizer:
                             fontsize=8,
                         )
 
-            ax.set_title(f"Participant {participant} | Image {img_id} | {image_name} | n={len(group)}")
+            #ax.set_title(f"Participant {participant} | Image {img_id} | {image_name} | n={len(group)}")
             self._format_axis(ax, w, h)
 
         self._browse_single(
@@ -117,15 +117,23 @@ class Visualizer:
         cmap: str = "jet",
         use_duration_weights: bool = False,
         modality: Optional[str] = None,
+        samples=None,
     ) -> None:
         images_dir = self._get_image_dir(modality)
         df = self._prepare_df(fixations_df, image_id=image_id)
         if df.empty:
             print("[VISUALIZER] No fixation to display.")
             return
+    
+        print(np.unique(df["participant_id"].loc[df['image_id']==image_id].values))
+        if samples != None : 
 
-        groups = self._groups(df, ["image_id", "image_name"])
-
+            df = df.loc[df["participant_id"].isin(samples)]
+            groups = self._groups(df, ["image_id", "image_name"])
+        else : 
+            groups = self._groups(df, ["image_id", "image_name"])
+       
+        print(groups) 
         def draw_panel(ax, key, group):
             img_id, image_name = key
             image, _ = self._load_image(image_name, images_dir=images_dir)
@@ -141,10 +149,10 @@ class Visualizer:
             self._imshow(ax, image)
             self._imshow_heatmap(ax, group, w, h, sigma, heatmap_alpha, cmap, use_duration_weights)
 
-            ax.set_title(
-                f"Aggregated heatmap | Image {img_id} | {image_name} | "
-                f"fixations={len(group)} | participants={group['participant_id'].nunique()}"
-            )
+            # ax.set_title(
+            #     f"Aggregated heatmap | Image {img_id} | {image_name} | "
+            #     f"fixations={len(group)} | participants={group['participant_id'].nunique()}"
+            # )
             self._format_axis(ax, w, h)
 
         self._browse_single(
@@ -344,10 +352,10 @@ class Visualizer:
 
         if participant_id is not None:
             df = df[df["participant_id"].astype(str) == str(participant_id)]
-
+            
         if image_id is not None:
             df = df[df["image_id"].astype(str) == str(image_id)]
-
+            
         if df.empty:
             return df
 
@@ -643,7 +651,7 @@ class Visualizer:
             ax.clear()
             key, group = groups[idx[0]]
             draw_func(ax, key, group)
-            fig.suptitle(f"[{idx[0] + 1}/{len(groups)}]", fontsize=12)
+            #fig.suptitle(f"[{idx[0] + 1}/{len(groups)}]", fontsize=12)
             plt.tight_layout()
             fig.canvas.draw_idle()
 
@@ -653,12 +661,14 @@ class Visualizer:
                 return
             key, _ = groups[idx[0]]
             output = save_dir / filename_func(key)
-            fig.savefig(output, dpi=300, bbox_inches="tight")
+            ax.set_axis_off()
+            fig.savefig(output, dpi=600, bbox_inches="tight",pad_inches=0)
             print(f"[VISUALIZER] Saved image to: {output}")
 
         self._connect_keys(fig, idx, len(groups), draw, save)
         draw()
         plt.show()
+        save()
 
     def _browse_compare(
         self,

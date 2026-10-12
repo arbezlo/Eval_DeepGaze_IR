@@ -17,7 +17,7 @@ class Saver:
         
     
 
-    def save_expe1_results(
+    def save_expe1_results_old(
         self,
         results: Results,
         output_dir: str | Path | None = None,
@@ -52,6 +52,38 @@ class Saver:
                 "score_perm_mean",
                 "score_perm_std",
                 "delta_perm_inter",
+            ],
+        )
+
+    def save_expe1_results(
+        self,
+        results: Results,
+        output_dir: str | Path | None = None,
+    ) -> pd.DataFrame:
+        output_dir = (
+            self.output_dir / "expe1" / "comparison"
+            if output_dir is None
+            else Path(output_dir)
+        )
+
+        expected_columns = [
+            "stem",
+            "metric_type",
+            "metric_name",
+            "score_perm_mean",
+            "score_perm_std",
+            "n_permutations",
+            "N_fix_maps",
+            "sigma",
+        ]
+
+        return self._save_results(
+            results=results,
+            output_dir=output_dir,
+            expected_columns=expected_columns,
+            summary_measures=[
+                "score_perm_mean",
+                "score_perm_std",
             ],
         )
 
