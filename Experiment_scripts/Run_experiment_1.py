@@ -1,5 +1,12 @@
 import sys
 from pathlib import Path
+
+if str(ROOT) not in sys.path:
+        sys.path.append(str(ROOT))
+
+
+ROOT = Path().resolve().parents[0]
+
 from analysis.saver import Saver
 from analysis.comparator import Comparator
 from analysis.analyzer import Analyzer
@@ -7,7 +14,6 @@ from helpers.loader import Loader
 
 
 
-ROOT = Path().resolve().parents[0]
 
 
 def main():
@@ -48,8 +54,6 @@ def main():
     )
 
 if __name__ == "__main__":
-    if str(ROOT) not in sys.path:
-        sys.path.append(str(ROOT))
 
     # Access Paths
     data_dir = ROOT / "DATA_OCCULO_2026" / "2026" / "paired" 
@@ -62,7 +66,5 @@ if __name__ == "__main__":
     infrared_path = data_dir / "dataframes" / "fixations_infrared.csv" 
     infrared_centerbias_path = data_dir / "centerbias" / "infrared.npy"
     visible_centerbias_path = data_dir / "centerbias" / "visible.npy"
-
-    print(ROOT)
     
     main()
