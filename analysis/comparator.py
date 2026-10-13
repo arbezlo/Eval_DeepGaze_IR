@@ -7,6 +7,15 @@ import numpy as np
 import pandas as pd
 
 from analysis.metrics import Metrics
+from analysis.gold_standard import (
+    COMPONENTS,
+    CenterBias,
+    GoldStandard,
+    ImageFixations,
+    explainable_information_gain,
+    fit_centerbias,
+    fit_gold_standard,
+)
 from saliency.builder import Builder
 from saliency.deepgaze import DeepGaze
 from helpers.indexer import Indexer
@@ -30,6 +39,7 @@ class Comparator:
         self.screen_width_cm = screen_width_cm
         self.screen_width_px = screen_width_px
         self.pixels_per_cm = screen_width_px / screen_width_cm
+        self.metadata_json = Path(metadata_json)
         self.builder = Builder()
         self.metrics = Metrics(epsilon)
         self.loader = Loader(metadata_json)
@@ -501,7 +511,175 @@ class Comparator:
 
         return results
 
-    
+
+    def _get_image_fixations(self, data: Dataset, stem: str) -> ImageFixations | None:
+        """
+        Collect the fixations of all participants on one stem, in continuous image pixel
+        coordinates (same screen -> image transform as Builder, without rounding).
+        Returns None when fewer than two participants have a fixation on the image.
+        """
+        dims = data[stem].dimensions_data
+        offset_x = (dims.screen_width - dims.stimuli_width) / 2.0
+        offset_y = (dims.screen_height - dims.stimuli_height) / 2.0
+        scale_x = dims.image_width / float(dims.stimuli_width)
+        scale_y = dims.image_height / float(dims.stimuli_height)
+
+        xs, ys, subjects = [], [], []
+        for participant_id, fixations in data[stem].participants_data.items():
+            for fixation in fixations:
+                x_stim = float(fixation.x) - offset_x
+                y_stim = float(fixation.y) - offset_y
+                if not (0 <= x_stim < dims.stimuli_width and 0 <= y_stim < dims.stimuli_height):
+                    continue
+                xs.append(x_stim * scale_x)
+                ys.append(y_stim * scale_y)
+                subjects.append(participant_id)
+
+        if len(set(subjects)) < 2:
+            return None
+
+        return ImageFixations(
+            x=np.minimum(xs, np.nextafter(dims.image_width, 0)),
+            y=np.minimum(ys, np.nextafter(dims.image_height, 0)),
+            subject=np.array(subjects),
+            width=int(dims.image_width),
+            height=int(dims.image_height),
+        )
+
+
+    def _compute_gold_standard_dataset(
+        self,
+        data: Dataset,
+        stems: list[str],
+        components: tuple[str, ...],
+        sigma: float | None,
+        seed: int | None,
+        image_dir: Path,
+    ) -> dict:
+        images = {}
+        for stem in stems:
+            image = self._get_image_fixations(data, stem)
+            if image is None:
+                print(f"Skipping stem '{stem}': fewer than two participants with valid fixations.")
+                continue
+            images[stem] = image
+
+        if len(images) < 2:
+            raise ValueError("The gold standard needs at least two images with valid fixations.")
+
+        kept_stems = list(images)
+        nx = np.concatenate([images[s].x / images[s].width for s in kept_stems])
+        ny = np.concatenate([images[s].y / images[s].height for s in kept_stems])
+        image_ids = np.concatenate([np.full(len(images[s].x), i) for i, s in enumerate(kept_stems)])
+
+        # Center-bias hyperparameters are cross-validated over images once; the center bias of
+        # each image is then built only from the fixations on the OTHER images.
+        cb_params = fit_centerbias(nx, ny, image_ids, seed=seed)
+        centerbiases = [
+            CenterBias(nx[image_ids != i], ny[image_ids != i], sigma=cb_params.sigma, eps=cb_params.eps)
+            for i in range(len(kept_stems))
+        ]
+
+        # One bandwidth and one set of mixture weights for the whole dataset.
+        gold_standard = fit_gold_standard(
+            [images[s] for s in kept_stems],
+            centerbiases,
+            components=components,
+            sigma=sigma,
+        )
+
+        per_image = {}
+        naive_models = {}
+        for stem, centerbias in tqdm(zip(kept_stems, centerbiases), total=len(kept_stems),
+                                     desc="Computing gold standard"):
+            # Naive model of the experiment 1 protocol: KDE with sigma = self.sigma_deg of visual
+            # angle, built from the other participants (leave-one-subject-out).
+            dims = data[stem].dimensions_data
+            naive_sigma = self._compute_sigma(self.sigma_deg, dims.stimuli_width, dims.image_width)
+            naive_models[stem] = GoldStandard(sigma=float(naive_sigma), weights={"kde": 1.0})
+            naive = explainable_information_gain(images[stem], naive_models[stem], centerbias)
+
+            per_image[stem] = {
+                **explainable_information_gain(images[stem], gold_standard, centerbias),
+                "n_participants": int(len(np.unique(images[stem].subject))),
+                "naive_sigma_px": float(naive_sigma),
+                "ll_naive_bits": naive["ll_gold_bits"],
+                "naive_ig_bits": naive["explainable_ig_bits"],
+            }
+
+        return {
+            "gold_standard": gold_standard,
+            "naive_models": naive_models,
+            # Center bias built from every image, for visualisation only.
+            "centerbias": CenterBias(nx, ny, sigma=cb_params.sigma, eps=cb_params.eps),
+            "centerbiases": dict(zip(kept_stems, centerbiases)),
+            "fixations": images,
+            "image_names": {stem: data[stem].image_data.name for stem in kept_stems},
+            "image_paths": {stem: image_dir / data[stem].image_data.name for stem in kept_stems},
+            "params": {
+                "sigma_px": gold_standard.sigma,
+                "weights": {k: float(v) for k, v in gold_standard.weights.items()},
+                "centerbias_sigma": cb_params.sigma,
+                "centerbias_eps": cb_params.eps,
+            },
+            # Dataset-level IG: mean over images of the per-image means (Kümmerer & Bethge, 2023).
+            "explainable_ig_bits": float(np.mean([r["explainable_ig_bits"] for r in per_image.values()])),
+            "naive_ig_bits": float(np.mean([r["naive_ig_bits"] for r in per_image.values()])),
+            "images": per_image,
+        }
+
+
+    def compute_gold_standard(
+        self,
+        infrared_df: pd.DataFrame,
+        visible_df: pd.DataFrame,
+        components: tuple[str, ...] = COMPONENTS,
+        sigma: float | None = None,
+        seed: int | None = 0,
+        infrared_image_dir: str | Path | None = None,
+        visible_image_dir: str | Path | None = None,
+    ) -> dict[str, dict]:
+        """
+        Gold-standard fixation density and explainable information gain on every image of
+        both modalities, as defined in analysis/gold_standard.py.
+
+        The KDE bandwidth (pixels) and the mixture weights are fitted once per modality on all
+        its images (leave-one-subject-out likelihood). Each image's center bias uses only
+        fixations from the other images of the same modality.
+
+        components : subset of ("kde", "centerbias", "uniform"), must contain "kde".
+        sigma      : fix the KDE bandwidth in image pixels instead of fitting it.
+        infrared_image_dir, visible_image_dir : stimulus directories, used by the saver's
+                     visualisations. Default: <data_dir>/images/<modality>, where
+                     <data_dir> is the parent of the metadata folder.
+
+        Each image is also scored with the naive model of experiment 1 (KDE with
+        sigma = self.sigma_deg of visual angle, leave-one-subject-out).
+
+        Returns {"VIS": ..., "IR": ...}, each with the fitted "gold_standard", the per-image
+        "naive_models" and "centerbiases" (reusable with gold_standard.model_information_gain),
+        the dataset-wide "centerbias", the "fixations", "image_names" and "image_paths" per stem, the fitted
+        "params", the dataset "explainable_ig_bits" and "naive_ig_bits", and per-stem results
+        under "images".
+        """
+        data_infrared = self.loader.load_dataset(infrared_df)
+        data_visible = self.loader.load_dataset(visible_df)
+        stems = self._get_stems(infrared_df, visible_df)
+
+        images_dir = self.metadata_json.parent.parent / "images"
+        image_dirs = {
+            "VIS": Path(visible_image_dir) if visible_image_dir is not None else images_dir / "visible",
+            "IR": Path(infrared_image_dir) if infrared_image_dir is not None else images_dir / "infrared",
+        }
+
+        return {
+            modality: self._compute_gold_standard_dataset(
+                data, stems, tuple(components), sigma, seed, image_dirs[modality]
+            )
+            for modality, data in (("VIS", data_visible), ("IR", data_infrared))
+        }
+
+
     def run_expe2(
         self,
         infrared_df: pd.DataFrame,
@@ -600,228 +778,3 @@ class Comparator:
                     }
 
         return results
-    
-    
-    
-    
-    
-    
-    
-    # def _compute_intra_scores(
-    #         self,
-    #         data: Dataset,
-    #         stem: str | int,
-    #         n_splits: int,
-    #         seed: int | None = 42,
-    #     ) -> dict[str, dict[str, float]]:
-    #         stem_data = data[stem]
-    #         participant_ids = list(stem_data.participants_data.keys())
-    
-    #         participant_maps = {
-    #             participant_id: self.builder.build_fixation_map(
-    #                 data=data,
-    #                 stem=stem,
-    #                 participant_id=participant_id,
-    #             )
-    #             for participant_id in participant_ids
-    #         }
-    
-    #         rng = np.random.default_rng(seed)
-    
-    #         scores: dict[str, dict[str, list[float]]] = {
-    #             metric_type: {
-    #                 metric_name: []
-    #                 for metric_name in metrics
-    #             }
-    #             for metric_type, metrics in self.metrics.registry.items()
-    #             if metric_type in ("similarity", "predictivity")
-    #         }
-    
-    #         for _ in range(n_splits):
-    #             shuffled_ids = rng.permutation(participant_ids)
-    #             split_index = len(shuffled_ids) // 2
-    
-    #             group_1_ids = shuffled_ids[:split_index]
-    #             group_2_ids = shuffled_ids[split_index:]
-    
-    #             fixation_map_1 = self.builder.aggregate_fixation_maps(
-    #                 [participant_maps[pid] for pid in group_1_ids]
-    #             )
-    #             fixation_map_2 = self.builder.aggregate_fixation_maps(
-    #                 [participant_maps[pid] for pid in group_2_ids]
-    #             )
-    
-    #             saliency_map_1 = self.builder.build_saliency_map(fixation_map_1, self.sigma)
-    #             saliency_map_2 = self.builder.build_saliency_map(fixation_map_2, self.sigma)
-    
-    #             for metric_name, metric_function in self.metrics.registry["predictivity"].items():
-    #                 score_1 = metric_function(fixation_map_1, saliency_map_2)
-    #                 score_2 = metric_function(fixation_map_2, saliency_map_1)
-    #                 scores["predictivity"][metric_name].append(float(np.nanmean([score_1, score_2])))
-    
-    #             for metric_name, metric_function in self.metrics.registry["similarity"].items():
-    #                 score_1 = metric_function(saliency_map_1, saliency_map_2)
-    #                 score_2 = metric_function(saliency_map_2, saliency_map_1)
-    #                 scores["similarity"][metric_name].append(float(np.nanmean([score_1, score_2])))
-    
-    #         return {
-    #             metric_type: {
-    #                 metric_name: float(np.nanmean(values))
-    #                 for metric_name, values in metric_scores.items()
-    #             }
-    #             for metric_type, metric_scores in scores.items()
-    #         }
-            
-            
-    
-            
-    #     def run_expe1_old(self, infrared_df: pd.DataFrame, visible_df: pd.DataFrame, n_splits: int = 50) -> Results:
-    #         data_infrared = self.loader.load_dataset(infrared_df)
-    #         data_visible = self.loader.load_dataset(visible_df)
-    #         stems = self._get_stems(infrared_df, visible_df) 
-    #         modality_v = self.index.normalize_modality("visible")
-    #         modality_i = self.index.normalize_modality("infrared")
-    #         results: Results = {
-    #             metric_type: {
-    #                 metric_name: {
-    #                     stem: None for stem in stems
-    #                     } 
-    #                 for metric_name in metric_names
-    #             } 
-    #             for metric_type, metric_names in self.metrics.registry.items()
-    #         }
-            
-    #         for stem in tqdm(stems, desc="Running modality analysis"):
-    #             fixation_map_v = self.builder.build_fixation_map(data_visible, stem)
-    #             fixation_map_i = self.builder.build_fixation_map(data_infrared, stem)
-    #             saliency_map_v = self.builder.build_saliency_map(fixation_map_v, self.sigma)  
-    #             saliency_map_i = self.builder.build_saliency_map(fixation_map_i, self.sigma) 
-                
-    #             annotations_v = self.index.get_annotation(modality_v, stem)
-    #             annotations_i = self.index.get_annotation(modality_i, stem)
-                
-    #             daynight = self.index.get_visibility(self.index.get_id(stem, "infrared"))
-                
-    #             intra_v = self.compute_intra_scores(data_visible, stem, n_splits)
-    #             intra_i = self.compute_intra_scores(data_infrared, stem, n_splits)
-            
-    #             for metric_type, metrics in self.metrics.registry.items():
-    #                 if metric_type == "roi":
-    #                     continue
-    #                 for metric_name, metric_function in metrics.items():
-    #                     vv = intra_v[metric_type][metric_name] # M_{H-H}^{RGB}
-    #                     ii = intra_i[metric_type][metric_name] # M_{H-H}^{LWIR}
-                        
-    #                     if metric_type == "similarity":
-    #                         vi = metric_function(saliency_map_v, saliency_map_i)
-    #                         iv = metric_function(saliency_map_i, saliency_map_v)
-                            
-    #                     if metric_type == "predictivity":
-    #                         vi = metric_function(fixation_map_v, saliency_map_i)
-    #                         iv = metric_function(fixation_map_i, saliency_map_v)
-    
-    #                     intra = np.mean([vv, ii]) # M_{H-H}^{intra}
-    #                     inter = np.mean([vi, iv]) # M_{H-H}^{inter}
-    #                     delta = intra - inter if metric_name not in ["emd", "kl"] else inter - intra # \Delta_{M}^{H-H}
-                        
-    #                     results[metric_type][metric_name][stem] = {
-    #                         "vv": vv,
-    #                         "ii": ii,
-    #                         "vi": vi,
-    #                         "iv": iv,
-    #                         "intra": intra,
-    #                         "inter": inter,
-    #                         "delta": delta,
-    #                         "daynight": daynight,
-    #                     }
-                        
-    #         return results
-        
-    # def run_expe2_old(self, 
-    #     infrared_df: pd.DataFrame, 
-    #     visible_df: pd.DataFrame, 
-    #     infrared_image_dir: Path, 
-    #     visible_image_dir: Path, 
-    #     infrared_centerbias_path: Path, 
-    #     visible_centerbias_path: Path,
-    #     n_splits: int,
-    # ) -> Results:
-        
-    #     deepgaze_v = DeepGaze(centerbias_path=visible_centerbias_path)
-    #     deepgaze_i = DeepGaze(centerbias_path=infrared_centerbias_path)
-        
-    #     modality_v = self.index.normalize_modality("visible")
-    #     modality_i = self.index.normalize_modality("infrared")
-        
-    #     data_infrared = self.loader.load_dataset(infrared_df)
-    #     data_visible = self.loader.load_dataset(visible_df)
-    #     stems = self._get_stems(infrared_df, visible_df) 
-        
-    #     results: Results = {
-    #         metric_type: {
-    #             metric_name: {
-    #                 stem: None for stem in stems
-    #                 } 
-    #             for metric_name in metric_names
-    #         } 
-    #         for metric_type, metric_names in self.metrics.registry.items()
-    #     }
-        
-    #     for stem in tqdm(stems, desc="Running deepgaze analysis"):
-    #         fixation_map_v = self.builder.build_fixation_map(data_visible, stem)
-    #         fixation_map_i = self.builder.build_fixation_map(data_infrared, stem) 
-    #         saliency_map_v = self.builder.build_saliency_map(fixation_map_v, self.sigma) 
-    #         saliency_map_i = self.builder.build_saliency_map(fixation_map_i, self.sigma)  
-            
-    #         annotations_v = self.index.get_annotation(modality_v, stem)
-    #         annotations_i = self.index.get_annotation(modality_i, stem)
-            
-    #         image_id_v = self.index.get_id(stem, modality_v)
-    #         image_id_i = self.index.get_id(stem, modality_i)
-    #         image_name_v = self.index.get_name(image_id_v)
-    #         image_name_i = self.index.get_name(image_id_i)
-    #         image_path_v = visible_image_dir / image_name_v
-    #         image_path_i = infrared_image_dir / image_name_i
-    #         image_v = self.loader.load_image(image_path_v)
-    #         image_i = self.loader.load_image(image_path_i)
-            
-    #         daynight = self.index.get_visibility(image_id_i)
-            
-    #         saliency_map_dg_v = deepgaze_v.predict(image_v)
-    #         saliency_map_dg_i = deepgaze_i.predict(image_i)
-            
-    #         intra_v = self.compute_intra_scores(data_visible, stem, n_splits)
-    #         intra_i = self.compute_intra_scores(data_infrared, stem, n_splits)
-                
-    #         for metric_type, metrics in self.metrics.registry.items():
-    #             if metric_type == "roi":
-    #                 continue
-    #             for metric_name, metric_function in metrics.items():
-                    
-    #                 vv = intra_v[metric_type][metric_name] # M_{H-H}^{RGB}
-    #                 ii = intra_i[metric_type][metric_name] # M_{H-H}^{LWIR}
-                    
-    #                 if metric_type == "similarity":
-    #                     vd = metric_function(saliency_map_v, saliency_map_dg_v) # M_{DG-H}^{RGB}
-    #                     id = metric_function(saliency_map_i, saliency_map_dg_i) # M_{DG-H}^{LWIR}
-                        
-    #                 if metric_type == "predictivity":
-    #                     vd = metric_function(fixation_map_v, saliency_map_dg_v) # M_{DG-H}^{RGB}  
-    #                     id = metric_function(fixation_map_i, saliency_map_dg_i) # M_{DG-H}^{LWIR} 
-
-    #                 delta_v = vv - vd if metric_name not in ["emd", "kl"] else vd - vv # \Delta_{M}^{RGB}
-    #                 delta_i = ii - id if metric_name not in ["emd", "kl"] else id - ii # \Delta_{M}^{LWIR}
-    #                 delta = delta_i - delta_v # \Delta_{M}^{DG-H}
-                    
-    #                 results[metric_type][metric_name][stem] = {
-    #                     "vv": vv,
-    #                     "ii": ii,
-    #                     "vd": vd,
-    #                     "id": id,
-    #                     "delta_i": delta_i,
-    #                     "delta_v": delta_v,
-    #                     "delta": delta,
-    #                     "daynight": daynight,
-    #                 }
-    #     return results
-

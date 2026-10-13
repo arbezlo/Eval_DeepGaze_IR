@@ -5,9 +5,12 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from analysis.gold_standard import _centerbias_log_map, gold_standard_map
+from helpers.loader import Loader
 from helpers.models import Results
 
 
@@ -118,6 +121,259 @@ class Saver:
                 "delta_rgb_ir",
             ],
         )
+
+
+    def save_gold_standard_results(
+        self,
+        results: Mapping[str, Mapping[str, Any]],
+        output_dir: str | Path | None = None,
+        image_dirs: Mapping[str, str | Path] | None = None,
+        n_examples: int = 5,
+        seed: int | None = 0,
+    ) -> pd.DataFrame:
+        """
+        Save the output of Comparator.compute_gold_standard.
+
+        For each modality:
+            <modality>/images.csv        one row per stem (gold standard and naive model)
+            <modality>/params.json       fitted parameters and dataset information gains
+            <modality>/centerbias.png    center bias of the whole modality
+            <modality>/visualisation/    gold standard vs naive model on n_examples random images
+        Also writes summary.csv (one row per modality) and all_results.csv (all modalities).
+
+        image_dirs : optional {modality: stimulus directory} (e.g. {"VIS": ..., "IR": ...}) that
+                     overrides the "image_paths" stored by Comparator.compute_gold_standard for
+                     the stimuli shown in the visualisations.
+        The same random stems are used for every modality when they share them.
+        """
+        output_dir = (
+            self.output_dir / "gold_standard"
+            if output_dir is None
+            else Path(output_dir)
+        )
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        expected_columns = [
+            "modality",
+            "stem",
+            "n_participants",
+            "n_fixations",
+            "ll_gold_bits",
+            "ll_centerbias_bits",
+            "explainable_ig_bits",
+            "naive_sigma_px",
+            "ll_naive_bits",
+            "naive_ig_bits",
+        ]
+
+        common_stems = sorted(set.intersection(
+            *(set(modality_results["images"]) for modality_results in results.values())
+        ))
+        rng = np.random.default_rng(seed)
+        example_stems = list(rng.choice(common_stems, size=min(n_examples, len(common_stems)), replace=False))
+
+        summary_rows: list[dict[str, Any]] = []
+        all_dataframes: list[pd.DataFrame] = []
+
+        for modality, modality_results in results.items():
+            modality_dir = output_dir / modality
+            modality_dir.mkdir(parents=True, exist_ok=True)
+
+            rows = [
+                {"modality": modality, "stem": str(stem), **values}
+                for stem, values in modality_results["images"].items()
+            ]
+            df = self._ensure_columns(pd.DataFrame(rows), expected_columns)
+            df.to_csv(modality_dir / "images.csv", index=False)
+            all_dataframes.append(df)
+
+            params = {
+                **modality_results["params"],
+                "explainable_ig_bits": modality_results["explainable_ig_bits"],
+                "naive_ig_bits": modality_results["naive_ig_bits"],
+                "n_images": len(df),
+            }
+            self._save_analysis_json(params, modality_dir / "params.json")
+
+            summary_rows.append({
+                "modality": modality,
+                "n_images": len(df),
+                "explainable_ig_bits": modality_results["explainable_ig_bits"],
+                "explainable_ig_bits_std": float(df["explainable_ig_bits"].std()),
+                "naive_ig_bits": modality_results["naive_ig_bits"],
+                "naive_ig_bits_std": float(df["naive_ig_bits"].std()),
+                "ll_gold_bits": self._safe_mean(df["ll_gold_bits"]),
+                "ll_naive_bits": self._safe_mean(df["ll_naive_bits"]),
+                "ll_centerbias_bits": self._safe_mean(df["ll_centerbias_bits"]),
+                "sigma_px": params["sigma_px"],
+                "naive_sigma_px": self._safe_mean(df["naive_sigma_px"]),
+                **{f"weight_{name}": weight for name, weight in params["weights"].items()},
+                "centerbias_sigma": params["centerbias_sigma"],
+                "centerbias_eps": params["centerbias_eps"],
+            })
+
+            self._plot_centerbias(modality, modality_results, modality_dir / "centerbias.png")
+
+            image_dir = None if image_dirs is None else image_dirs.get(modality)
+            stems = example_stems or list(rng.choice(
+                list(modality_results["images"]),
+                size=min(n_examples, len(modality_results["images"])),
+                replace=False,
+            ))
+            for stem in stems:
+                self._plot_gold_standard_example(
+                    modality,
+                    modality_results,
+                    stem,
+                    modality_results.get("image_paths", {}).get(stem) if image_dir is None
+                    else Path(image_dir) / modality_results["image_names"][stem],
+                    modality_dir / "visualisation" / f"{stem}.png",
+                )
+
+        pd.DataFrame(summary_rows).to_csv(output_dir / "summary.csv", index=False)
+
+        all_results = (
+            pd.concat(all_dataframes, ignore_index=True)
+            if all_dataframes
+            else pd.DataFrame(columns=expected_columns)
+        )
+        all_results.to_csv(output_dir / "all_results.csv", index=False)
+
+        return all_results
+
+
+    @staticmethod
+    def _plot_centerbias(
+        modality: str,
+        modality_results: Mapping[str, Any],
+        output_path: Path,
+    ) -> None:
+        # Displayed at the size of the most common image of the modality.
+        sizes = pd.Series([(img.width, img.height) for img in modality_results["fixations"].values()])
+        width, height = sizes.mode()[0]
+        centerbias = modality_results["centerbias"]
+        density = np.exp(_centerbias_log_map(centerbias, width, height))
+
+        fig, ax = plt.subplots(figsize=(7, 7 * height / width + 0.6))
+        im = ax.imshow(density, cmap="magma", extent=(0, width, height, 0))
+        ax.contour(np.arange(width) + 0.5, np.arange(height) + 0.5, density,
+                   levels=5, colors="white", linewidths=0.6, alpha=0.7)
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="probability per pixel")
+        ax.set_title(
+            f"{modality} center bias ({len(sizes)} images, {len(centerbias.nx)} fixations)\n"
+            f"sigma = {centerbias.sigma:.3f} (image fraction), uniform weight = {centerbias.eps:.3f}"
+        )
+        ax.set_xlabel("x (px)")
+        ax.set_ylabel("y (px)")
+        fig.tight_layout()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, dpi=150)
+        plt.close(fig)
+
+
+    @staticmethod
+    def _plot_gold_standard_example(
+        modality: str,
+        modality_results: Mapping[str, Any],
+        stem: str,
+        image_path: Path | None,
+        output_path: Path,
+        scale: float = 2.0,
+        dpi: int = 250,
+    ) -> None:
+        """
+        2 x 2 figure: stimulus with fixations | gold standard
+                      naive model             | gold standard - naive
+        Densities are overlaid on the stimulus, with the fixations on every panel. Each panel is
+        drawn at `scale` output pixels per image pixel.
+        """
+        img = modality_results["fixations"][stem]
+        centerbias = modality_results["centerbiases"][stem]
+        values = modality_results["images"][stem]
+        width, height = img.width, img.height
+        extent = (0, width, height, 0)
+
+        if image_path is not None and Path(image_path).exists():
+            stimulus = Loader.load_image(image_path)
+        else:
+            print(f"Stimulus not found for {modality} {stem} ({image_path}); using a grey background.")
+            stimulus = np.full((height, width), 128, dtype=np.uint8)
+        # Grey version under the density overlays, so their colours stay readable.
+        stimulus_grey = stimulus[..., :3].mean(axis=2) if stimulus.ndim == 3 else stimulus
+
+        log_gold = gold_standard_map(img, modality_results["gold_standard"], centerbias)
+        log_naive = gold_standard_map(img, modality_results["naive_models"][stem])
+        gold, naive = np.exp(log_gold), np.exp(log_naive)
+        difference = gold - naive
+
+        # Exact panel size in inches, plus margins for titles and colour bars.
+        panel_w, panel_h = width * scale / dpi, height * scale / dpi
+        left, gap, title, cbar = 0.1, 0.25, 0.75, 1.1
+        fig_w = left + 2 * (panel_w + cbar) + gap + 0.2
+        fig_h = 2 * (panel_h + title) + 0.1
+        fig = plt.figure(figsize=(fig_w, fig_h), dpi=dpi)
+
+        def panel(row, col):
+            x0 = left + col * (panel_w + cbar + gap)
+            y0 = fig_h - (row + 1) * (panel_h + title)
+            ax = fig.add_axes((x0 / fig_w, y0 / fig_h, panel_w / fig_w, panel_h / fig_h))
+            cax = fig.add_axes(((x0 + panel_w + 0.1) / fig_w, y0 / fig_h, 0.15 / fig_w, panel_h / fig_h))
+            if row == col == 0:
+                ax.imshow(stimulus, cmap="gray", extent=extent)
+            else:
+                ax.imshow(stimulus_grey, cmap="gray", extent=extent, alpha=0.6)
+            ax.set_xticks([])
+            ax.set_yticks([])
+            return ax, cax
+
+        def overlay(ax, data, cmap, vmin, vmax):
+            """Colour-mapped data whose opacity grows with its magnitude."""
+            norm = plt.Normalize(vmin, vmax)
+            rgba = plt.get_cmap(cmap)(norm(data))
+            magnitude = np.abs(data) / max(abs(vmin), abs(vmax))
+            rgba[..., 3] = 0.85 * np.sqrt(np.clip(magnitude, 0, 1))
+            ax.imshow(rgba, extent=extent)
+            return plt.cm.ScalarMappable(norm=norm, cmap=cmap)
+
+        def colorbar(mappable, cax):
+            # Always "x 1e-5"-style ticks, so the tick labels stay short.
+            cb = fig.colorbar(mappable, cax=cax, label="probability per pixel")
+            cb.formatter.set_powerlimits((0, 0))
+            cb.update_ticks()
+
+        def fixations(ax, size=14):
+            ax.scatter(img.x, img.y, s=size, c="yellow", edgecolors="black", linewidths=0.5)
+
+        ax, cax = panel(0, 0)
+        fixations(ax, size=22)
+        ax.set_title(f"{modality} {stem}: {len(img.x)} fixations, "
+                     f"{values['n_participants']} participants")
+        cax.axis("off")
+
+        # Shared colour scale so the two densities are directly comparable.
+        vmax = max(gold.max(), naive.max())
+        for (row, col), density, label in (
+            ((0, 1), gold, f"Gold standard (sigma = {modality_results['gold_standard'].sigma:.1f} px)\n"
+                           f"IG = {values['explainable_ig_bits']:.3f} bit/fix"),
+            ((1, 0), naive, f"Naive KDE (sigma = 1 deg = {values['naive_sigma_px']:.1f} px)\n"
+                            f"IG = {values['naive_ig_bits']:.3f} bit/fix"),
+        ):
+            ax, cax = panel(row, col)
+            mappable = overlay(ax, density, "inferno", 0, vmax)
+            fixations(ax)
+            ax.set_title(label)
+            colorbar(mappable, cax)
+
+        ax, cax = panel(1, 1)
+        limit = float(np.abs(difference).max())
+        mappable = overlay(ax, difference, "RdBu_r", -limit, limit)
+        fixations(ax)
+        ax.set_title("Gold standard - naive\n(red: more mass in the gold standard)")
+        colorbar(mappable, cax)
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, dpi=dpi)
+        plt.close(fig)
 
 
     def save_expe1_analysis(

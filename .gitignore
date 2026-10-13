@@ -11,6 +11,7 @@ DG/
 # Files
 TODO.md
 DATA_OCULO.zip
+examples/Analysis_dev.ipynb
 
 # Extension
 *.png
