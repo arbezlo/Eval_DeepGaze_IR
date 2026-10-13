@@ -242,6 +242,106 @@ class Saver:
         return all_results
 
 
+    def save_deepgaze_ige(
+        self,
+        results: Mapping[str, Mapping[str, Any]],
+        output_dir: str | Path | None = None,
+    ) -> pd.DataFrame:
+        """
+        Save the output of Comparator.run_deepgaze_ige.
+
+            <modality>/images.csv   one row per stem (log-likelihoods, information gains, IGE)
+            summary.csv             one row per modality; "ige" is the dataset IGE (ratio of the
+                                    mean IGs), "ige_mean_per_image" the mean of the per-image ratios
+            all_results.csv         stems of both modalities, RGB vs IR, in the run_expe2 format
+                                    (metric_type, metric_name, score_rgb, score_ir, delta_rgb_ir),
+                                    so it can be passed to Analyzer.analyze_expe2
+
+        Returns the all_results table.
+        """
+        output_dir = (
+            self.output_dir / "expe2" / "ige"
+            if output_dir is None
+            else Path(output_dir)
+        )
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        image_columns = [
+            "modality",
+            "stem",
+            "n_participants",
+            "n_fixations",
+            "ll_centerbias_bits",
+            "ll_gold_bits",
+            "ll_model_bits",
+            "explainable_ig_bits",
+            "model_ig_bits",
+            "ige",
+        ]
+        comparison_columns = [
+            "stem",
+            "metric_type",
+            "metric_name",
+            "score_rgb",
+            "score_ir",
+            "delta_rgb_ir",
+        ]
+
+        summary_rows: list[dict[str, Any]] = []
+        dataframes: dict[str, pd.DataFrame] = {}
+
+        for modality, modality_results in results.items():
+            modality_dir = output_dir / modality
+            modality_dir.mkdir(parents=True, exist_ok=True)
+
+            rows = [
+                {"modality": modality, "stem": str(stem), **values}
+                for stem, values in modality_results["images"].items()
+            ]
+            df = self._ensure_columns(pd.DataFrame(rows), image_columns)
+            df.to_csv(modality_dir / "images.csv", index=False)
+            dataframes[modality] = df.set_index("stem")
+
+            summary_rows.append({
+                "modality": modality,
+                "n_images": len(df),
+                "explainable_ig_bits": modality_results["explainable_ig_bits"],
+                "model_ig_bits": modality_results["model_ig_bits"],
+                "model_ig_bits_std": float(df["model_ig_bits"].std()),
+                "ige": modality_results["ige"],
+                "ige_mean_per_image": self._safe_mean(df["ige"]),
+                "ige_median_per_image": float(df["ige"].median()),
+                "ll_centerbias_bits": self._safe_mean(df["ll_centerbias_bits"]),
+                "ll_gold_bits": self._safe_mean(df["ll_gold_bits"]),
+                "ll_model_bits": self._safe_mean(df["ll_model_bits"]),
+                "centerbias_path": str(modality_results["centerbias_path"]),
+            })
+
+        pd.DataFrame(summary_rows).to_csv(output_dir / "summary.csv", index=False)
+
+        # RGB vs IR on the stems kept in both modalities. Positive delta: better on RGB.
+        comparison_rows: list[dict[str, Any]] = []
+        if {"VIS", "IR"} <= set(dataframes):
+            visible, infrared = dataframes["VIS"], dataframes["IR"]
+            for metric_name in ("ige", "model_ig_bits"):
+                for stem in sorted(set(visible.index) & set(infrared.index)):
+                    score_rgb = float(visible.at[stem, metric_name])
+                    score_ir = float(infrared.at[stem, metric_name])
+                    comparison_rows.append({
+                        "stem": stem,
+                        "metric_type": "information_gain",
+                        "metric_name": metric_name,
+                        "score_rgb": score_rgb,
+                        "score_ir": score_ir,
+                        "delta_rgb_ir": score_rgb - score_ir,
+                    })
+
+        all_results = self._ensure_columns(pd.DataFrame(comparison_rows), comparison_columns)
+        all_results.to_csv(output_dir / "all_results.csv", index=False)
+
+        return all_results
+
+
     @staticmethod
     def _plot_centerbias(
         modality: str,

@@ -52,6 +52,9 @@ class DeepGaze:
     def _load_centerbias(self, centerbias_path: Path = None, centerbias_type: str = "uniform", centerbias_size: tuple = (1024, 1024)) -> np.ndarray:
         if centerbias_path is not None:
             centerbias = np.load(centerbias_path).astype(np.float64)
+            if np.all(centerbias >= 0):
+                # Density map (e.g. saliency.centerbias.build_centerbias): DeepGaze expects a log-density.
+                centerbias = np.log(centerbias / centerbias.sum() + 1e-12)
 
         else:
             width, height = centerbias_size[0], centerbias_size[1]
@@ -142,6 +145,11 @@ class DeepGaze:
 
 
     def predict(self, image: np.ndarray) -> np.ndarray:
+        return np.exp(self.predict_log_density(image))
+
+
+    def predict_log_density(self, image: np.ndarray) -> np.ndarray:
+        """Natural-log probability per pixel, normalised over the image (used for information gains)."""
         image = self._normalize_input(image)
         height, width = image.shape[:2]
         
@@ -167,16 +175,14 @@ class DeepGaze:
                 keepdim=True,
             )
 
-            density = torch.exp(log_density)
-
-        density = (
-            density[0, 0]
+        log_density = (
+            log_density[0, 0]
             .detach()
             .cpu()
             .numpy()
         )
 
-        return density
+        return log_density
     
     
     @staticmethod

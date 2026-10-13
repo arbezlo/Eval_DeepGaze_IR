@@ -1,4 +1,5 @@
 from __future__ import annotations
+from collections.abc import Mapping
 from tqdm import tqdm
 from pathlib import Path
 from math import tan, radians
@@ -9,12 +10,14 @@ import pandas as pd
 from analysis.metrics import Metrics
 from analysis.gold_standard import (
     COMPONENTS,
+    LN2,
     CenterBias,
     GoldStandard,
     ImageFixations,
     explainable_information_gain,
     fit_centerbias,
     fit_gold_standard,
+    model_information_gain,
 )
 from saliency.builder import Builder
 from saliency.deepgaze import DeepGaze
@@ -547,6 +550,67 @@ class Comparator:
         )
 
 
+    @staticmethod
+    def _normalised_fixations(
+        images: dict[str, ImageFixations],
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Fixations of every image in [0, 1) coordinates, with the index of their image."""
+        stems = list(images)
+        nx = np.concatenate([images[s].x / images[s].width for s in stems])
+        ny = np.concatenate([images[s].y / images[s].height for s in stems])
+        image_ids = np.concatenate([np.full(len(images[s].x), i) for i, s in enumerate(stems)])
+        return nx, ny, image_ids
+
+
+    def _leave_one_image_out_centerbiases(
+        self,
+        images: dict[str, ImageFixations],
+        sigma: float,
+        eps: float,
+    ) -> dict[str, CenterBias]:
+        """Center bias of each image, built only from the fixations on the OTHER images."""
+        nx, ny, image_ids = self._normalised_fixations(images)
+        return {
+            stem: CenterBias(nx[image_ids != i], ny[image_ids != i], sigma=sigma, eps=eps)
+            for i, stem in enumerate(images)
+        }
+
+
+    def _load_gold_standard(self, modality_dir: str | Path, data: Dataset) -> dict:
+        """
+        Reload one modality saved by Saver.save_gold_standard_results (<output>/<modality>/).
+
+        The per-image gold-standard results come from images.csv. The leave-one-image-out center
+        biases are rebuilt from the fixations of the saved stems with the fitted parameters of
+        params.json, so they are the same baselines as the ones used for the saved IG.
+        """
+        modality_dir = Path(modality_dir)
+        per_image = pd.read_csv(modality_dir / "images.csv", dtype={"stem": str})
+        params = self.loader.load_json(modality_dir / "params.json")
+
+        images = {}
+        for stem in per_image["stem"]:
+            stem = self.index.normalize_stem(stem)
+            image = self._get_image_fixations(data, stem) if stem in data else None
+            if image is None:
+                raise ValueError(
+                    f"Stem '{stem}' of {modality_dir / 'images.csv'} has no usable fixations in the "
+                    "DataFrame; recompute the gold standard on the current data."
+                )
+            images[stem] = image
+
+        return {
+            "fixations": images,
+            "centerbiases": self._leave_one_image_out_centerbiases(
+                images, params["centerbias_sigma"], params["centerbias_eps"]
+            ),
+            "images": {
+                self.index.normalize_stem(row["stem"]): row
+                for row in per_image.to_dict(orient="records")
+            },
+        }
+
+
     def _compute_gold_standard_dataset(
         self,
         data: Dataset,
@@ -568,17 +632,14 @@ class Comparator:
             raise ValueError("The gold standard needs at least two images with valid fixations.")
 
         kept_stems = list(images)
-        nx = np.concatenate([images[s].x / images[s].width for s in kept_stems])
-        ny = np.concatenate([images[s].y / images[s].height for s in kept_stems])
-        image_ids = np.concatenate([np.full(len(images[s].x), i) for i, s in enumerate(kept_stems)])
+        nx, ny, image_ids = self._normalised_fixations(images)
 
         # Center-bias hyperparameters are cross-validated over images once; the center bias of
         # each image is then built only from the fixations on the OTHER images.
         cb_params = fit_centerbias(nx, ny, image_ids, seed=seed)
-        centerbiases = [
-            CenterBias(nx[image_ids != i], ny[image_ids != i], sigma=cb_params.sigma, eps=cb_params.eps)
-            for i in range(len(kept_stems))
-        ]
+        centerbiases = list(self._leave_one_image_out_centerbiases(
+            images, cb_params.sigma, cb_params.eps
+        ).values())
 
         # One bandwidth and one set of mixture weights for the whole dataset.
         gold_standard = fit_gold_standard(
@@ -776,5 +837,107 @@ class Comparator:
                         "score_ir": float(score_ir),
                         "delta_rgb_ir": float(delta),
                     }
+
+        return results
+
+
+    def run_deepgaze_ige(
+        self,
+        infrared_df: pd.DataFrame,
+        visible_df: pd.DataFrame,
+        infrared_image_dir: Path,
+        visible_image_dir: Path,
+        infrared_centerbias_path: Path,
+        visible_centerbias_path: Path,
+        gold_standard: Mapping[str, Mapping] | str | Path,
+    ) -> dict[str, dict]:
+        """
+        Information gain explained (IGE) by DeepGaze on every image of both modalities,
+        IGE(Fix_mod, DG(Image_mod)), following Kümmerer & Bethge (2023), Annu. Rev. Vis. Sci. 9:269-91:
+
+            IG_model = mean_i [ log2 p_DG(x_i) - log2 p_centerbias(x_i) ]     (bit / fixation)
+            IGE      = IG_model / IG_gold
+
+        IG_gold and the center-bias baseline are the ones of the gold standard, so that both
+        information gains are measured against the same baseline. The baseline of each image is
+        built only from the fixations on the other images of the same modality.
+
+        DeepGaze gets the stimulus of its modality (IR images are duplicated to 3 channels) and
+        the center bias of that modality as prior (infrared_centerbias_path, visible_centerbias_path).
+
+        gold_standard : output of Comparator.compute_gold_standard, or the output directory of
+                        Saver.save_gold_standard_results (containing VIS/ and IR/).
+
+        Returns {"VIS": ..., "IR": ...}, each with per-stem results under "images" and the dataset
+        values: mean "explainable_ig_bits" and "model_ig_bits" over images and their ratio "ige"
+        (ratio of the averages, not the mean of the per-image ratios, as in the paper).
+        """
+        data = {
+            "VIS": self.loader.load_dataset(visible_df),
+            "IR": self.loader.load_dataset(infrared_df),
+        }
+        image_dirs = {"VIS": Path(visible_image_dir), "IR": Path(infrared_image_dir)}
+        centerbias_paths = {"VIS": Path(visible_centerbias_path), "IR": Path(infrared_centerbias_path)}
+        modality_names = {
+            "VIS": self.index.normalize_modality("visible"),
+            "IR": self.index.normalize_modality("infrared"),
+        }
+
+        results = {}
+        for modality in ("VIS", "IR"):
+            gold = (
+                gold_standard[modality]
+                if isinstance(gold_standard, Mapping)
+                else self._load_gold_standard(Path(gold_standard) / modality, data[modality])
+            )
+            deepgaze = DeepGaze(centerbias_path=centerbias_paths[modality])
+
+            per_image = {}
+            for stem in tqdm(list(gold["images"]), desc=f"Computing DeepGaze IGE ({modality})"):
+                img = gold["fixations"][stem]
+                centerbias = gold["centerbiases"][stem]
+                gold_values = gold["images"][stem]
+
+                # Sanity check: the baseline must be the one of the stored gold-standard IG.
+                ll_centerbias_bits = float(
+                    (centerbias.log_prob(img).mean() + np.log(img.width * img.height)) / LN2
+                )
+                if not np.isclose(ll_centerbias_bits, gold_values["ll_centerbias_bits"], atol=1e-6):
+                    raise ValueError(
+                        f"{modality} {stem}: the center-bias baseline differs from the gold standard "
+                        f"({ll_centerbias_bits:.6f} vs {gold_values['ll_centerbias_bits']:.6f} bit/fix). "
+                        "Recompute the gold standard on the current data."
+                    )
+
+                image_id = self.index.get_id(stem, modality_names[modality])
+                image = self.loader.load_image(image_dirs[modality] / self.index.get_name(image_id))
+                log_density = deepgaze.predict_log_density(image)
+
+                model_ig = model_information_gain(img, log_density, centerbias)
+                explainable_ig = float(gold_values["explainable_ig_bits"])
+
+                per_image[stem] = {
+                    "n_participants": int(len(np.unique(img.subject))),
+                    "n_fixations": int(len(img.x)),
+                    "ll_centerbias_bits": ll_centerbias_bits,
+                    "ll_gold_bits": float(gold_values["ll_gold_bits"]),
+                    "ll_model_bits": ll_centerbias_bits + model_ig,
+                    "explainable_ig_bits": explainable_ig,
+                    "model_ig_bits": model_ig,
+                    # Unstable when the explainable IG of the image is close to 0.
+                    "ige": model_ig / explainable_ig if explainable_ig != 0 else float("nan"),
+                }
+
+            del deepgaze
+
+            explainable_ig_bits = float(np.mean([r["explainable_ig_bits"] for r in per_image.values()]))
+            model_ig_bits = float(np.mean([r["model_ig_bits"] for r in per_image.values()]))
+            results[modality] = {
+                "centerbias_path": centerbias_paths[modality],
+                "explainable_ig_bits": explainable_ig_bits,
+                "model_ig_bits": model_ig_bits,
+                "ige": model_ig_bits / explainable_ig_bits,
+                "images": per_image,
+            }
 
         return results
