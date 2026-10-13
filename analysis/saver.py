@@ -246,18 +246,24 @@ class Saver:
         self,
         results: Mapping[str, Mapping[str, Any]],
         output_dir: str | Path | None = None,
+        n_examples: int = 5,
+        seed: int | None = 0,
     ) -> pd.DataFrame:
         """
         Save the output of Comparator.run_deepgaze_ige.
 
-            <modality>/images.csv   one row per stem (log-likelihoods, information gains, IGE)
-            summary.csv             one row per modality; "ige" is the dataset IGE (ratio of the
-                                    mean IGs), "ige_mean_per_image" the mean of the per-image ratios
-            all_results.csv         stems of both modalities, RGB vs IR, in the run_expe2 format
-                                    (metric_type, metric_name, score_rgb, score_ir, delta_rgb_ir),
-                                    so it can be passed to Analyzer.analyze_expe2
+            <modality>/images.csv       one row per stem (log-likelihoods, information gains, IGE)
+            <modality>/visualisation/   gold standard, naive model and DeepGaze on n_examples random images
+            summary.csv                 one row per modality; "ige" is the dataset IGE (ratio of the
+                                        mean IGs), "ige_mean_per_image" the mean of the per-image ratios;
+                                        "ige_naive*" are the same for the naive model (KDE, sigma = 1 deg),
+                                        the baseline for the IGE of DeepGaze
+            all_results.csv             stems of both modalities, RGB vs IR, in the run_expe2 format
+                                        (metric_type, metric_name, score_rgb, score_ir, delta_rgb_ir),
+                                        so it can be passed to Analyzer.analyze_expe2
 
-        Returns the all_results table.
+        The example stems are drawn as in save_gold_standard_results, so with the same seed and
+        stems the figures show the same images. Returns the all_results table.
         """
         output_dir = (
             self.output_dir / "expe2" / "ige"
@@ -275,8 +281,10 @@ class Saver:
             "ll_gold_bits",
             "ll_model_bits",
             "explainable_ig_bits",
+            "naive_ig_bits",
             "model_ig_bits",
             "ige",
+            "ige_naive",
         ]
         comparison_columns = [
             "stem",
@@ -286,6 +294,12 @@ class Saver:
             "score_ir",
             "delta_rgb_ir",
         ]
+
+        common_stems = sorted(set.intersection(
+            *(set(modality_results["images"]) for modality_results in results.values())
+        ))
+        rng = np.random.default_rng(seed)
+        example_stems = list(rng.choice(common_stems, size=min(n_examples, len(common_stems)), replace=False))
 
         summary_rows: list[dict[str, Any]] = []
         dataframes: dict[str, pd.DataFrame] = {}
@@ -311,11 +325,28 @@ class Saver:
                 "ige": modality_results["ige"],
                 "ige_mean_per_image": self._safe_mean(df["ige"]),
                 "ige_median_per_image": float(df["ige"].median()),
+                "naive_ig_bits": modality_results["naive_ig_bits"],
+                "ige_naive": modality_results["ige_naive"],
+                "ige_naive_mean_per_image": self._safe_mean(df["ige_naive"]),
+                "ige_naive_median_per_image": float(df["ige_naive"].median()),
                 "ll_centerbias_bits": self._safe_mean(df["ll_centerbias_bits"]),
                 "ll_gold_bits": self._safe_mean(df["ll_gold_bits"]),
                 "ll_model_bits": self._safe_mean(df["ll_model_bits"]),
                 "centerbias_path": str(modality_results["centerbias_path"]),
             })
+
+            stems = example_stems or list(rng.choice(
+                list(modality_results["images"]),
+                size=min(n_examples, len(modality_results["images"])),
+                replace=False,
+            ))
+            for stem in stems:
+                self._plot_deepgaze_ige_example(
+                    modality,
+                    modality_results,
+                    stem,
+                    modality_dir / "visualisation" / f"{stem}.png",
+                )
 
         pd.DataFrame(summary_rows).to_csv(output_dir / "summary.csv", index=False)
 
@@ -323,7 +354,7 @@ class Saver:
         comparison_rows: list[dict[str, Any]] = []
         if {"VIS", "IR"} <= set(dataframes):
             visible, infrared = dataframes["VIS"], dataframes["IR"]
-            for metric_name in ("ige", "model_ig_bits"):
+            for metric_name in ("ige", "ige_naive", "model_ig_bits"):
                 for stem in sorted(set(visible.index) & set(infrared.index)):
                     score_rgb = float(visible.at[stem, metric_name])
                     score_ir = float(infrared.at[stem, metric_name])
@@ -371,8 +402,9 @@ class Saver:
         plt.close(fig)
 
 
-    @staticmethod
+    @classmethod
     def _plot_gold_standard_example(
+        cls,
         modality: str,
         modality_results: Mapping[str, Any],
         stem: str,
@@ -384,27 +416,104 @@ class Saver:
         """
         2 x 2 figure: stimulus with fixations | gold standard
                       naive model             | gold standard - naive
-        Densities are overlaid on the stimulus, with the fixations on every panel. Each panel is
-        drawn at `scale` output pixels per image pixel.
         """
         img = modality_results["fixations"][stem]
         centerbias = modality_results["centerbiases"][stem]
         values = modality_results["images"][stem]
+
+        log_gold = gold_standard_map(img, modality_results["gold_standard"], centerbias)
+        log_naive = gold_standard_map(img, modality_results["naive_models"][stem])
+        gold, naive = np.exp(log_gold), np.exp(log_naive)
+
+        cls._plot_density_grid(
+            img,
+            image_path,
+            f"{modality} {stem}: {len(img.x)} fixations, {values['n_participants']} participants",
+            [
+                (f"Gold standard (sigma = {modality_results['gold_standard'].sigma:.1f} px)\n"
+                 f"IG = {values['explainable_ig_bits']:.3f} bit/fix", gold, "density"),
+                (f"Naive KDE (sigma = 1 deg = {values['naive_sigma_px']:.1f} px)\n"
+                 f"IG = {values['naive_ig_bits']:.3f} bit/fix", naive, "density"),
+                ("Gold standard - naive\n(red: more mass in the gold standard)", gold - naive, "difference"),
+            ],
+            output_path,
+            scale=scale,
+            dpi=dpi,
+        )
+
+
+    @classmethod
+    def _plot_deepgaze_ige_example(
+        cls,
+        modality: str,
+        modality_results: Mapping[str, Any],
+        stem: str,
+        output_path: Path,
+        scale: float = 2.0,
+        dpi: int = 250,
+    ) -> None:
+        """
+        2 x 2 figure: stimulus with fixations | gold standard
+                      naive model             | DeepGaze
+        """
+        img = modality_results["fixations"][stem]
+        centerbias = modality_results["centerbiases"][stem]
+        values = modality_results["images"][stem]
+
+        gold = np.exp(gold_standard_map(img, modality_results["gold_standard"], centerbias))
+        naive = np.exp(gold_standard_map(img, modality_results["naive_models"][stem]))
+        deepgaze = np.exp(modality_results["log_densities"][stem].astype(np.float64))
+        deepgaze /= deepgaze.sum()
+
+        cls._plot_density_grid(
+            img,
+            modality_results["image_paths"].get(stem),
+            f"{modality} {stem}: {len(img.x)} fixations, {values['n_participants']} participants",
+            [
+                (f"Gold standard (sigma = {modality_results['gold_standard'].sigma:.1f} px)\n"
+                 f"IG = {values['explainable_ig_bits']:.3f} bit/fix", gold, "density"),
+                (f"Naive KDE (sigma = {modality_results['naive_models'][stem].sigma:.1f} px)\n"
+                 f"IG = {values['naive_ig_bits']:.3f} bit/fix, IGE = {values['ige_naive']:.1%}",
+                 naive, "density"),
+                (f"DeepGaze IIE\n"
+                 f"IG = {values['model_ig_bits']:.3f} bit/fix, IGE = {values['ige']:.1%}",
+                 deepgaze, "density"),
+            ],
+            output_path,
+            show_fixations=(True, True, False),
+            scale=scale,
+            dpi=dpi,
+        )
+
+
+    @staticmethod
+    def _plot_density_grid(
+        img,
+        image_path: Path | None,
+        stimulus_title: str,
+        panels: Sequence[tuple[str, np.ndarray, str]],
+        output_path: Path,
+        show_fixations: Sequence[bool] = (True, True, True),
+        scale: float = 2.0,
+        dpi: int = 250,
+    ) -> None:
+        """
+        2 x 2 figure: the stimulus with the fixations of img, then the three (title, data, kind)
+        panels in reading order. kind "density" panels share one colour scale, so they are directly
+        comparable; a "difference" panel gets its own symmetric scale. Densities are overlaid on the
+        stimulus, with the fixations on the panels where show_fixations is True. Each panel is drawn
+        at `scale` output pixels per image pixel.
+        """
         width, height = img.width, img.height
         extent = (0, width, height, 0)
 
         if image_path is not None and Path(image_path).exists():
             stimulus = Loader.load_image(image_path)
         else:
-            print(f"Stimulus not found for {modality} {stem} ({image_path}); using a grey background.")
+            print(f"Stimulus not found ({image_path}); using a grey background.")
             stimulus = np.full((height, width), 128, dtype=np.uint8)
         # Grey version under the density overlays, so their colours stay readable.
         stimulus_grey = stimulus[..., :3].mean(axis=2) if stimulus.ndim == 3 else stimulus
-
-        log_gold = gold_standard_map(img, modality_results["gold_standard"], centerbias)
-        log_naive = gold_standard_map(img, modality_results["naive_models"][stem])
-        gold, naive = np.exp(log_gold), np.exp(log_naive)
-        difference = gold - naive
 
         # Exact panel size in inches, plus margins for titles and colour bars.
         panel_w, panel_h = width * scale / dpi, height * scale / dpi
@@ -446,30 +555,21 @@ class Saver:
 
         ax, cax = panel(0, 0)
         fixations(ax, size=22)
-        ax.set_title(f"{modality} {stem}: {len(img.x)} fixations, "
-                     f"{values['n_participants']} participants")
+        ax.set_title(stimulus_title)
         cax.axis("off")
 
-        # Shared colour scale so the two densities are directly comparable.
-        vmax = max(gold.max(), naive.max())
-        for (row, col), density, label in (
-            ((0, 1), gold, f"Gold standard (sigma = {modality_results['gold_standard'].sigma:.1f} px)\n"
-                           f"IG = {values['explainable_ig_bits']:.3f} bit/fix"),
-            ((1, 0), naive, f"Naive KDE (sigma = 1 deg = {values['naive_sigma_px']:.1f} px)\n"
-                            f"IG = {values['naive_ig_bits']:.3f} bit/fix"),
-        ):
+        vmax = max(data.max() for _, data, kind in panels if kind == "density")
+        for (row, col), (label, data, kind), show in zip(((0, 1), (1, 0), (1, 1)), panels, show_fixations):
             ax, cax = panel(row, col)
-            mappable = overlay(ax, density, "inferno", 0, vmax)
-            fixations(ax)
+            if kind == "density":
+                mappable = overlay(ax, data, "inferno", 0, vmax)
+            else:
+                limit = float(np.abs(data).max())
+                mappable = overlay(ax, data, "RdBu_r", -limit, limit)
+            if show:
+                fixations(ax)
             ax.set_title(label)
             colorbar(mappable, cax)
-
-        ax, cax = panel(1, 1)
-        limit = float(np.abs(difference).max())
-        mappable = overlay(ax, difference, "RdBu_r", -limit, limit)
-        fixations(ax)
-        ax.set_title("Gold standard - naive\n(red: more mass in the gold standard)")
-        colorbar(mappable, cax)
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(output_path, dpi=dpi)

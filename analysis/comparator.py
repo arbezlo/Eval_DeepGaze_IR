@@ -582,7 +582,8 @@ class Comparator:
 
         The per-image gold-standard results come from images.csv. The leave-one-image-out center
         biases are rebuilt from the fixations of the saved stems with the fitted parameters of
-        params.json, so they are the same baselines as the ones used for the saved IG.
+        params.json, so they are the same baselines as the ones used for the saved IG. The fitted
+        gold standard and the naive models are rebuilt from params.json and images.csv.
         """
         modality_dir = Path(modality_dir)
         per_image = pd.read_csv(modality_dir / "images.csv", dtype={"stem": str})
@@ -599,15 +600,22 @@ class Comparator:
                 )
             images[stem] = image
 
+        rows = {
+            self.index.normalize_stem(row["stem"]): row
+            for row in per_image.to_dict(orient="records")
+        }
+
         return {
+            "gold_standard": GoldStandard(sigma=float(params["sigma_px"]), weights=params["weights"]),
+            "naive_models": {
+                stem: GoldStandard(sigma=float(row["naive_sigma_px"]), weights={"kde": 1.0})
+                for stem, row in rows.items()
+            },
             "fixations": images,
             "centerbiases": self._leave_one_image_out_centerbiases(
                 images, params["centerbias_sigma"], params["centerbias_eps"]
             ),
-            "images": {
-                self.index.normalize_stem(row["stem"]): row
-                for row in per_image.to_dict(orient="records")
-            },
+            "images": rows,
         }
 
 
@@ -871,6 +879,11 @@ class Comparator:
         Returns {"VIS": ..., "IR": ...}, each with per-stem results under "images" and the dataset
         values: mean "explainable_ig_bits" and "model_ig_bits" over images and their ratio "ige"
         (ratio of the averages, not the mean of the per-image ratios, as in the paper).
+        "ige_naive" is the IGE of the naive model of the gold standard (KDE with
+        sigma = self.sigma_deg, leave-one-subject-out), a baseline for "ige".
+        Also keeps, per stem, the DeepGaze "log_densities", the stimulus "image_paths" and the gold
+        standard's "fixations", "centerbiases" and "naive_models", plus its fitted "gold_standard",
+        for the visualisations of Saver.save_deepgaze_ige.
         """
         data = {
             "VIS": self.loader.load_dataset(visible_df),
@@ -892,7 +905,7 @@ class Comparator:
             )
             deepgaze = DeepGaze(centerbias_path=centerbias_paths[modality])
 
-            per_image = {}
+            per_image, log_densities, image_paths = {}, {}, {}
             for stem in tqdm(list(gold["images"]), desc=f"Computing DeepGaze IGE ({modality})"):
                 img = gold["fixations"][stem]
                 centerbias = gold["centerbiases"][stem]
@@ -910,11 +923,12 @@ class Comparator:
                     )
 
                 image_id = self.index.get_id(stem, modality_names[modality])
-                image = self.loader.load_image(image_dirs[modality] / self.index.get_name(image_id))
-                log_density = deepgaze.predict_log_density(image)
+                image_path = image_dirs[modality] / self.index.get_name(image_id)
+                log_density = deepgaze.predict_log_density(self.loader.load_image(image_path))
 
                 model_ig = model_information_gain(img, log_density, centerbias)
                 explainable_ig = float(gold_values["explainable_ig_bits"])
+                naive_ig = float(gold_values["naive_ig_bits"])
 
                 per_image[stem] = {
                     "n_participants": int(len(np.unique(img.subject))),
@@ -923,21 +937,36 @@ class Comparator:
                     "ll_gold_bits": float(gold_values["ll_gold_bits"]),
                     "ll_model_bits": ll_centerbias_bits + model_ig,
                     "explainable_ig_bits": explainable_ig,
+                    "naive_ig_bits": naive_ig,
                     "model_ig_bits": model_ig,
                     # Unstable when the explainable IG of the image is close to 0.
                     "ige": model_ig / explainable_ig if explainable_ig != 0 else float("nan"),
+                    # IGE of the naive model of experiment 1 (KDE, sigma = 1 deg): baseline for "ige".
+                    "ige_naive": naive_ig / explainable_ig if explainable_ig != 0 else float("nan"),
                 }
+                log_densities[stem] = log_density.astype(np.float32)
+                image_paths[stem] = image_path
 
             del deepgaze
 
             explainable_ig_bits = float(np.mean([r["explainable_ig_bits"] for r in per_image.values()]))
+            naive_ig_bits = float(np.mean([r["naive_ig_bits"] for r in per_image.values()]))
             model_ig_bits = float(np.mean([r["model_ig_bits"] for r in per_image.values()]))
             results[modality] = {
                 "centerbias_path": centerbias_paths[modality],
                 "explainable_ig_bits": explainable_ig_bits,
+                "naive_ig_bits": naive_ig_bits,
                 "model_ig_bits": model_ig_bits,
                 "ige": model_ig_bits / explainable_ig_bits,
+                "ige_naive": naive_ig_bits / explainable_ig_bits,
                 "images": per_image,
+                # For the saver's visualisations.
+                "log_densities": log_densities,
+                "image_paths": image_paths,
+                "fixations": {stem: gold["fixations"][stem] for stem in per_image},
+                "centerbiases": {stem: gold["centerbiases"][stem] for stem in per_image},
+                "gold_standard": gold["gold_standard"],
+                "naive_models": {stem: gold["naive_models"][stem] for stem in per_image},
             }
 
         return results
