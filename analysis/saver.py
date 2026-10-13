@@ -332,6 +332,8 @@ class Saver:
                 "ll_centerbias_bits": self._safe_mean(df["ll_centerbias_bits"]),
                 "ll_gold_bits": self._safe_mean(df["ll_gold_bits"]),
                 "ll_model_bits": self._safe_mean(df["ll_model_bits"]),
+                "model": modality_results["model"],
+                "msdb_dataset": modality_results["msdb_dataset"],
                 "centerbias_path": str(modality_results["centerbias_path"]),
             })
 
@@ -475,7 +477,7 @@ class Saver:
                 (f"Naive KDE (sigma = {modality_results['naive_models'][stem].sigma:.1f} px)\n"
                  f"IG = {values['naive_ig_bits']:.3f} bit/fix, IGE = {values['ige_naive']:.1%}",
                  naive, "density"),
-                (f"DeepGaze IIE\n"
+                (f"DeepGaze {modality_results['model']}\n"
                  f"IG = {values['model_ig_bits']:.3f} bit/fix, IGE = {values['ige']:.1%}",
                  deepgaze, "density"),
             ],

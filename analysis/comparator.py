@@ -858,6 +858,8 @@ class Comparator:
         infrared_centerbias_path: Path,
         visible_centerbias_path: Path,
         gold_standard: Mapping[str, Mapping] | str | Path,
+        model: str = "IIE",
+        msdb_dataset: int | None = None,
     ) -> dict[str, dict]:
         """
         Information gain explained (IGE) by DeepGaze on every image of both modalities,
@@ -875,6 +877,10 @@ class Comparator:
 
         gold_standard : output of Comparator.compute_gold_standard, or the output directory of
                         Saver.save_gold_standard_results (containing VIS/ and IR/).
+        model         : "IIE" (DeepGaze IIE) or "MSDB" (DeepGaze MSDB). MSDB also gets the pixels
+                        per degree of visual angle of each image, from the display geometry.
+        msdb_dataset  : MSDB only. None for the parameters averaged over its training datasets,
+                        or a deepgaze_pytorch.MSDBDataset index (see saliency.deepgaze.DeepGaze).
 
         Returns {"VIS": ..., "IR": ...}, each with per-stem results under "images" and the dataset
         values: mean "explainable_ig_bits" and "model_ig_bits" over images and their ratio "ige"
@@ -903,7 +909,9 @@ class Comparator:
                 if isinstance(gold_standard, Mapping)
                 else self._load_gold_standard(Path(gold_standard) / modality, data[modality])
             )
-            deepgaze = DeepGaze(centerbias_path=centerbias_paths[modality])
+            deepgaze = DeepGaze(
+                centerbias_path=centerbias_paths[modality], model=model, msdb_dataset=msdb_dataset
+            )
 
             per_image, log_densities, image_paths = {}, {}, {}
             for stem in tqdm(list(gold["images"]), desc=f"Computing DeepGaze IGE ({modality})"):
@@ -924,7 +932,12 @@ class Comparator:
 
                 image_id = self.index.get_id(stem, modality_names[modality])
                 image_path = image_dirs[modality] / self.index.get_name(image_id)
-                log_density = deepgaze.predict_log_density(self.loader.load_image(image_path))
+                # Image pixels per degree of visual angle, as displayed during the experiment.
+                dims = data[modality][stem].dimensions_data
+                pixel_per_dva = self._compute_sigma(1.0, dims.stimuli_width, dims.image_width)
+                log_density = deepgaze.predict_log_density(
+                    self.loader.load_image(image_path), pixel_per_dva=pixel_per_dva
+                )
 
                 model_ig = model_information_gain(img, log_density, centerbias)
                 explainable_ig = float(gold_values["explainable_ig_bits"])
@@ -953,6 +966,8 @@ class Comparator:
             naive_ig_bits = float(np.mean([r["naive_ig_bits"] for r in per_image.values()]))
             model_ig_bits = float(np.mean([r["model_ig_bits"] for r in per_image.values()]))
             results[modality] = {
+                "model": model,
+                "msdb_dataset": msdb_dataset,
                 "centerbias_path": centerbias_paths[modality],
                 "explainable_ig_bits": explainable_ig_bits,
                 "naive_ig_bits": naive_ig_bits,

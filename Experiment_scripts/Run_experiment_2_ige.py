@@ -1,4 +1,5 @@
 import sys
+import argparse
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -7,6 +8,8 @@ if str(ROOT) not in sys.path:
         sys.path.append(str(ROOT))
 
 
+
+from deepgaze_pytorch import MSDBDataset
 
 from analysis.saver import Saver
 from analysis.comparator import Comparator
@@ -57,14 +60,37 @@ def main():
         infrared_centerbias_path=infrared_centerbias_path,
         visible_centerbias_path=visible_centerbias_path,
         gold_standard=gold_standard,
+        model=model,
+        msdb_dataset=msdb_dataset,
     )
 
     saver.save_deepgaze_ige(
         results=ige_results,
-        output_dir=output_dir_expe2 / "ige",
+        output_dir=output_dir_expe2 / ige_folder,
     )
 
 if __name__ == "__main__":
+
+    parser = argparse.ArgumentParser(description="Gold standard and information gain explained by DeepGaze.")
+    parser.add_argument("--model", type=str.upper, choices=["IIE", "MSDB"], default="IIE",
+                        help="DeepGaze model to evaluate (default: IIE).")
+    parser.add_argument("--msdb-dataset", type=str.upper,
+                        choices=["MIT1003", "CAT2000", "COCO_FREEVIEW", "DAEMONS", "FIGRIM"],
+                        default=None,
+                        help="MSDB only: use the parameters learned for this dataset instead of the "
+                             "average over its training datasets (default: average).")
+    args = parser.parse_args()
+    if args.msdb_dataset is not None and args.model != "MSDB":
+        parser.error("--msdb-dataset only applies to --model MSDB")
+
+    model = args.model
+    msdb_dataset = None
+    ige_folder = "ige"
+    if model == "MSDB":
+        ige_folder = "ige_msdb"
+        if args.msdb_dataset is not None:
+            msdb_dataset = getattr(MSDBDataset, args.msdb_dataset)
+            ige_folder = f"ige_msdb_{args.msdb_dataset.lower()}"
 
     # Access Paths
     data_dir = ROOT / "DATA_OCCULO_2026" / "2026" / "paired"

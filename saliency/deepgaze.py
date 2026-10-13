@@ -3,11 +3,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 from scipy.special import logsumexp
-from deepgaze_pytorch import DeepGazeIIE
+from deepgaze_pytorch import DeepGazeIIE, DeepGazeMSDB
 
 import cv2
 import numpy as np
 import torch
+
+
+MODELS = {"IIE": DeepGazeIIE, "MSDB": DeepGazeMSDB}
 
 
 class DeepGaze:
@@ -18,15 +21,28 @@ class DeepGaze:
         device: Optional[str] = None,
         centerbias_path: Optional[str | Path] = None,
         centerbias_type: Optional[str] = "uniform",
-        centerbias_size: Optional[tuple] = (1024, 1024)
+        centerbias_size: Optional[tuple] = (1024, 1024),
+        model: str = "IIE",
+        msdb_dataset: Optional[int] = None,
     ) -> None:
+        """
+        model        : "IIE" (DeepGaze IIE) or "MSDB" (DeepGaze MSDB, Kümmerer et al., ICCV 2025).
+        msdb_dataset : MSDB only. None uses the parameters averaged over its training datasets
+                       (the setting for a new dataset), or a deepgaze_pytorch.MSDBDataset index to
+                       use the parameters learned for one of them.
+        """
+        if model not in MODELS:
+            raise ValueError(f"Unknown DeepGaze model {model!r}, expected one of {list(MODELS)}")
+
         self.device = torch.device(
             device if device is not None else ("cuda" if torch.cuda.is_available() else "cpu")
         )
         self.centerbias = self._load_centerbias(centerbias_path, centerbias_type, centerbias_size)
         self._centerbias_cache: dict[tuple[int, int], torch.Tensor] = {}
-        
-        self.model = DeepGazeIIE(pretrained=True).to(self.device)
+
+        self.model_name = model
+        self.msdb_dataset = msdb_dataset
+        self.model = MODELS[model](pretrained=True).to(self.device)
         self.model.eval()
     
     def _get_centerbias(
@@ -144,12 +160,21 @@ class DeepGaze:
         return centerbias.astype(np.float32)
 
 
-    def predict(self, image: np.ndarray) -> np.ndarray:
-        return np.exp(self.predict_log_density(image))
+    def predict(self, image: np.ndarray, pixel_per_dva: Optional[float] = None) -> np.ndarray:
+        return np.exp(self.predict_log_density(image, pixel_per_dva))
 
 
-    def predict_log_density(self, image: np.ndarray) -> np.ndarray:
-        """Natural-log probability per pixel, normalised over the image (used for information gains)."""
+    def predict_log_density(self, image: np.ndarray, pixel_per_dva: Optional[float] = None) -> np.ndarray:
+        """
+        Natural-log probability per pixel, normalised over the image (used for information gains).
+
+        pixel_per_dva : pixels of `image` per degree of visual angle, as it was displayed. Required
+                        by DeepGaze MSDB, which rescales the image to fixed visual resolutions;
+                        ignored by DeepGaze IIE.
+        """
+        if self.model_name == "MSDB" and pixel_per_dva is None:
+            raise ValueError("DeepGaze MSDB needs the pixels per degree of visual angle of the image.")
+
         image = self._normalize_input(image)
         height, width = image.shape[:2]
         
@@ -160,9 +185,16 @@ class DeepGaze:
         centerbias_tensor = self._get_centerbias(height, width)
 
         with torch.inference_mode():
-            log_density = self.model(image_tensor, centerbias_tensor)
+            if self.model_name == "MSDB":
+                log_density = self.model(
+                    image_tensor, centerbias_tensor, pixel_per_dva=pixel_per_dva, dataset=self.msdb_dataset
+                )
+                # (B, H, W) -> (B, 1, H, W), the output shape of DeepGaze IIE.
+                log_density = log_density.unsqueeze(1)
+            else:
+                log_density = self.model(image_tensor, centerbias_tensor)
 
-            
+
             if log_density.shape[-2:] != (height, width):
                 raise RuntimeError(
                     f"Unexpected output shape {log_density.shape[-2:]}, "

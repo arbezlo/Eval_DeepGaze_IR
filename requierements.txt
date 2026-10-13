@@ -11,3 +11,5 @@ jupyter
 pillow
 psychopy
 git+https://github.com/matthias-k/DeepGaze.git
+einops
+git+https://github.com/openai/CLIP.git
