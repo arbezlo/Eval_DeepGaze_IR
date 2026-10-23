@@ -23,7 +23,13 @@ from saliency.builder import Builder
 from saliency.deepgaze import DeepGaze
 from helpers.indexer import Indexer
 from helpers.loader import Loader
-from helpers.models import Dataset, Results
+from helpers.models import Dataset, Results, RoiData
+
+
+# Name of the group made of every ROI of an image, whatever its class.
+ALL_ROI_CLASSES = "all"
+# Stand-in for an image without annotation.
+_NO_ROIS = RoiData(image_id=0, image_stem="", image_modality="", rois=[])
 
 
 class Comparator:
@@ -982,6 +988,175 @@ class Comparator:
                 "centerbiases": {stem: gold["centerbiases"][stem] for stem in per_image},
                 "gold_standard": gold["gold_standard"],
                 "naive_models": {stem: gold["naive_models"][stem] for stem in per_image},
+            }
+
+        return results
+
+    def run_deepgaze_roi(
+        self,
+        infrared_df: pd.DataFrame,
+        visible_df: pd.DataFrame,
+        infrared_image_dir: Path,
+        visible_image_dir: Path,
+        infrared_centerbias_path: Path,
+        visible_centerbias_path: Path,
+        model: str = "IIE",
+        msdb_dataset: int | None = None,
+        classes: list[int] | None = None,
+        class_names: Mapping[int, str] | None = None,
+        stems: list[str] | None = None,
+        keep_maps: bool = True,
+    ) -> dict[str, dict]:
+        """
+        Region-of-interest (ROI) analysis of the DeepGaze prediction on every image of both
+        modalities, with the ROI metrics of Metrics.registry["roi"], computed per ROI class.
+
+        For each image and each class present in its annotations (bounding boxes of that modality),
+        the metrics are computed on the union of the boxes of that class, and once more on the
+        union of all the boxes (class "all"). Four maps ("source") are scored the same way:
+
+            deepgaze    DeepGaze density (sums to 1), with the modality center bias as prior
+            human       human saliency map: fixations blurred by a Gaussian of self.sigma_deg
+            fixations   raw human fixation counts (ratio = fraction of the fixations in the ROI)
+            centerbias  the center-bias prior given to DeepGaze, alone (control: how much of the
+                        ROI mass is explained by the position of the ROI in the image)
+
+        Metrics (see analysis/metrics.py): "mass" (map mass inside the ROI), "ratio" (mass
+        inside / total mass), "density" (mass per ROI pixel) and "normalized_ratio" (ratio / ROI
+        area fraction; 1 = chance, > 1 = the ROI gets more than its share of the map).
+
+        classes     : class ids to analyse. None: every class found in the annotations.
+        class_names : {class_id: name}; missing ids are named "class_<id>".
+        stems       : restrict the analysis to these stems (e.g. a few images for a test run).
+        keep_maps   : keep the maps, ROIs and fixations per stem for Saver.save_deepgaze_roi.
+
+        Returns {"VIS": ..., "IR": ...}, each with "rows" (one dict per stem, class and source),
+        the run settings and, with keep_maps, per-stem "maps", "rois", "fixations", "image_paths".
+        """
+        data = {
+            "VIS": self.loader.load_dataset(visible_df),
+            "IR": self.loader.load_dataset(infrared_df),
+        }
+        image_dirs = {"VIS": Path(visible_image_dir), "IR": Path(infrared_image_dir)}
+        centerbias_paths = {"VIS": Path(visible_centerbias_path), "IR": Path(infrared_centerbias_path)}
+        modality_names = {
+            "VIS": self.index.normalize_modality("visible"),
+            "IR": self.index.normalize_modality("infrared"),
+        }
+
+        all_stems = self._get_stems(infrared_df, visible_df)
+        if stems is not None:
+            wanted = {self.index.normalize_stem(stem) for stem in stems}
+            missing = sorted(wanted - set(all_stems))
+            if missing:
+                raise ValueError(f"Stems not found in the fixation data: {missing}")
+            all_stems = [stem for stem in all_stems if stem in wanted]
+
+        # Classes present in the annotations of the analysed stems, in both modalities.
+        annotated = sorted({
+            roi.class_id
+            for stem in all_stems
+            for modality in modality_names.values()
+            for roi in (self.index.get_annotation(modality, stem) or _NO_ROIS).rois
+        })
+        if classes is None:
+            classes = annotated
+        else:
+            classes = sorted({int(c) for c in classes})
+            absent = sorted(set(classes) - set(annotated))
+            if absent:
+                print(f"Warning: classes {absent} have no ROI in the analysed images.")
+        names = {c: str((class_names or {}).get(c, f"class_{c}")) for c in classes}
+
+        roi_metrics = self.metrics.registry["roi"]
+
+        results = {}
+        for modality in ("VIS", "IR"):
+            deepgaze = DeepGaze(
+                centerbias_path=centerbias_paths[modality], model=model, msdb_dataset=msdb_dataset
+            )
+            rows: list[dict] = []
+            maps, rois_per_stem, fixations, image_paths = {}, {}, {}, {}
+
+            for stem in tqdm(all_stems, desc=f"Computing DeepGaze ROI metrics ({modality})"):
+                annotation = self.index.get_annotation(modality_names[modality], stem)
+                rois = [roi for roi in (annotation or _NO_ROIS).rois if roi.class_id in names]
+
+                image_id = self.index.get_id(stem, modality_names[modality])
+                image_path = image_dirs[modality] / self.index.get_name(image_id)
+                dims = data[modality][stem].dimensions_data
+                sigma = self._compute_sigma(self.sigma_deg, dims.stimuli_width, dims.image_width)
+
+                # Image pixels per degree of visual angle, as displayed during the experiment.
+                pixel_per_dva = self._compute_sigma(1.0, dims.stimuli_width, dims.image_width)
+                log_density = deepgaze.predict_log_density(
+                    self.loader.load_image(image_path), pixel_per_dva=pixel_per_dva
+                )
+                height, width = log_density.shape
+
+                fixation_map = self.builder.build_fixation_map(data[modality], stem)
+                if fixation_map.shape != (height, width):
+                    raise ValueError(
+                        f"{modality} {stem}: DeepGaze map {log_density.shape} and fixation map "
+                        f"{fixation_map.shape} have different sizes."
+                    )
+                stem_maps = {
+                    "deepgaze": np.exp(log_density.astype(np.float64)),
+                    "human": self.builder.build_saliency_map(fixation_map, sigma).astype(np.float64),
+                    "fixations": fixation_map.astype(np.float64),
+                    "centerbias": np.exp(deepgaze._resize_centerbias(height, width).astype(np.float64)),
+                }
+                for source in ("deepgaze", "centerbias"):
+                    stem_maps[source] /= stem_maps[source].sum()
+
+                groups = {names[c]: (c, [roi for roi in rois if roi.class_id == c]) for c in classes}
+                groups[ALL_ROI_CLASSES] = (None, rois)
+
+                for class_name, (class_id, class_rois) in groups.items():
+                    if not class_rois:
+                        continue
+                    mask = self.metrics._roi_mask(class_rois, log_density)
+                    common = {
+                        "modality": modality,
+                        "stem": stem,
+                        "class_id": class_id,
+                        "class_name": class_name,
+                        "n_rois": len(class_rois),
+                        "roi_area_px": int(mask.sum()),
+                        "roi_area_fraction": float(mask.mean()),
+                        "n_fixations": int(fixation_map.sum()),
+                        "n_participants": len(data[modality][stem].participants_data),
+                    }
+                    for source, saliency_map in stem_maps.items():
+                        rows.append({
+                            **common,
+                            "source": source,
+                            **{name: fn(saliency_map, class_rois) for name, fn in roi_metrics.items()},
+                        })
+
+                if keep_maps:
+                    maps[stem] = {
+                        "deepgaze": stem_maps["deepgaze"].astype(np.float32),
+                        "human": stem_maps["human"].astype(np.float32),
+                    }
+                    rois_per_stem[stem] = rois
+                    fixations[stem] = self._get_image_fixations(data[modality], stem)
+                    image_paths[stem] = image_path
+
+            del deepgaze
+
+            results[modality] = {
+                "model": model,
+                "msdb_dataset": msdb_dataset,
+                "centerbias_path": centerbias_paths[modality],
+                "sigma_deg": self.sigma_deg,
+                "class_names": names,
+                "rows": rows,
+                # For the saver's visualisations.
+                "maps": maps,
+                "rois": rois_per_stem,
+                "fixations": fixations,
+                "image_paths": image_paths,
             }
 
         return results

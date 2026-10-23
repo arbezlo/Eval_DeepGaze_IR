@@ -16,7 +16,7 @@ class Analyzer:
         missing = set(columns) - set(df.columns)
         if missing: raise ValueError(f"Missing columns: {sorted(missing)}") 
    
-    def analyze_expe1(self, df: pd.DataFrame) -> dict:
+    def analyze_expe1_old(self, df: pd.DataFrame) -> dict:
         self.validate_columns(df, ["metric_type", "metric_name", "delta_perm_inter"])
         df = df.copy()
         df["delta_perm_inter"] = pd.to_numeric(df["delta_perm_inter"], errors="coerce")
@@ -40,6 +40,42 @@ class Analyzer:
                 "mean_score_inter": float(metric_df["score_inter"].mean()),
                 "mean_score_perm": float(metric_df["score_perm_mean"].mean()),
                 "mean_delta_perm_inter": float(metric_df["delta_perm_inter"].mean()),
+            })
+
+            key = f"{metric_type}_{metric_name}"
+            results[key] = result
+
+        self.stats.apply_correction(
+            test_results=list(results.values()),
+            correction_method=self.correction_method,
+        )
+
+        return results
+
+    def analyze_expe1(self, df: pd.DataFrame) -> dict:
+        self.validate_columns(df, ["metric_type", "metric_name", "score_perm_mean"])
+        df = df.copy()
+        df["score_perm_mean"] = pd.to_numeric(df["score_perm_mean"], errors="coerce")
+
+        results: dict[str, dict[str, dict]] = {}
+
+        grouped = df.groupby(["metric_type", "metric_name"], observed=True, sort=False)
+        
+        for (metric_type, metric_name), metric_df in grouped:
+
+            result = self.stats.run_ttest(
+                x=metric_df["score_perm_mean"],
+                y=0.0,
+                test_name="score_perm_mean",
+                alternative="greater"
+            )
+
+            result.update({
+                "metric_type": str(metric_type),
+                "metric_name": str(metric_name),
+                # "mean_score_inter": float(metric_df["score_inter"].mean()),
+                # "mean_score_perm": float(metric_df["score_perm_mean"].mean()),
+                "mean_intra_vs_inter_perm": float(metric_df["score_perm_mean"].mean()),
             })
 
             key = f"{metric_type}_{metric_name}"

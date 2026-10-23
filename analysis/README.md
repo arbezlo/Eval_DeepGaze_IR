@@ -38,6 +38,15 @@ The active metrics are registered in `Metrics.registry`.
 - `auc_judd`: discrimination between fixated and non-fixated pixels;
 - `ig`: mean log-likelihood gain over a uniform baseline, reported in nats per fixation.
 
+### ROI metrics
+
+Computed inside the annotated bounding boxes, per ROI class (`Comparator.run_deepgaze_roi`, run with `Experiment_scripts/Run_experiment_3_roi.py`):
+
+- `mass`: map mass inside the ROI;
+- `ratio`: mass inside the ROI divided by the total mass;
+- `density`: mass per ROI pixel;
+- `normalized_ratio`: `ratio` divided by the fraction of the image covered by the ROI (1 = chance).
+
 ROI-related functions are available in `metrics.py`, but they are not enabled in the current pipeline.
 
 ## Comparisons

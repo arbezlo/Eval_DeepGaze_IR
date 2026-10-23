@@ -8,6 +8,7 @@ from typing import Any
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 
 from analysis.gold_standard import _centerbias_log_map, gold_standard_map
 from helpers.loader import Loader
@@ -578,13 +579,29 @@ class Saver:
         plt.close(fig)
 
 
-    def save_expe1_analysis(
+    def save_expe1_analysis_old(
         self,
         analysis: Mapping[str, Any],
         output_dir: str | Path | None = None,
     ) -> pd.DataFrame:
         output_dir = (
             self.output_dir / "expe1" / "statistics"
+            if output_dir is None
+            else Path(output_dir)
+        )
+
+        return self._save_analysis(
+            analysis=analysis,
+            output_dir=output_dir,
+        )
+
+    def save_expe1_analysis(
+    self,
+    analysis: Mapping[str, Any],
+    output_dir: str | Path | None = None,
+    ) -> pd.DataFrame:
+        output_dir = (
+            self.output_dir / "statistics"
             if output_dir is None
             else Path(output_dir)
         )
@@ -879,3 +896,317 @@ class Saver:
         )
 
         return table
+
+    # ------------------------------------------------------------------
+    # ROI ANALYSIS (Comparator.run_deepgaze_roi)
+    # ------------------------------------------------------------------
+
+    # Fixed colour per class position (sorted class ids); the 9th and later classes are white
+    # dashed boxes. Every box also carries its class name, so colour is never the only cue.
+    ROI_COLORS = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6", "#e34948")
+    ROI_SOURCE_COLORS = {"deepgaze": "#2a78d6", "human": "#eb6834", "centerbias": "#1baf7a"}
+    ROI_METRICS = ("mass", "ratio", "density", "normalized_ratio")
+
+    def save_deepgaze_roi(
+        self,
+        results: Mapping[str, Mapping[str, Any]],
+        output_dir: str | Path | None = None,
+        visualise: bool = True,
+        n_visualisations: int | None = None,
+        seed: int | None = 0,
+    ) -> pd.DataFrame:
+        """
+        Save the output of Comparator.run_deepgaze_roi.
+
+            <modality>/images.csv   one row per stem, class and source (deepgaze, human, fixations,
+                                    centerbias) with the ROI metrics
+            per_class.csv           one row per modality, source and class: number of images
+                                    containing the class, mean / std / sem / median of each metric
+            all_results.csv         RGB vs IR on the stems where the class is annotated in both
+                                    modalities, in the run_expe2 format (metric_type =
+                                    "roi_<source>_<class>", metric_name = metric), so it can be
+                                    passed to Analyzer.analyze_expe2
+            per_class.png           ratio and normalized ratio per class, modality and source
+            visualisation/<stem>.png  stimulus, DeepGaze and human maps with the ROIs, VIS and IR
+                                    (every stem, or n_visualisations random stems; needs the maps,
+                                    i.e. keep_maps=True in run_deepgaze_roi)
+
+        Returns the per_class table.
+        """
+        output_dir = (
+            self.output_dir / "expe3" / "roi"
+            if output_dir is None
+            else Path(output_dir)
+        )
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        image_columns = [
+            "modality", "stem", "class_id", "class_name", "source", *self.ROI_METRICS,
+            "n_rois", "roi_area_px", "roi_area_fraction", "n_fixations", "n_participants",
+        ]
+        comparison_columns = ["stem", "metric_type", "metric_name", "score_rgb", "score_ir", "delta_rgb_ir"]
+
+        frames = []
+        for modality, modality_results in results.items():
+            df = self._ensure_columns(pd.DataFrame(modality_results["rows"]), image_columns)
+            df["class_id"] = df["class_id"].astype("Int64")
+            modality_dir = output_dir / modality
+            modality_dir.mkdir(parents=True, exist_ok=True)
+            df.to_csv(modality_dir / "images.csv", index=False)
+            frames.append(df)
+        all_rows = pd.concat(frames, ignore_index=True)
+
+        # Per-class summary. Classes keep the order of their ids, "all" last.
+        class_order = self._roi_class_order(results)
+        summary_rows = []
+        for (modality, source, class_name), group in all_rows.groupby(
+            ["modality", "source", "class_name"], sort=False
+        ):
+            row = {
+                "modality": modality,
+                "source": source,
+                "class_id": group["class_id"].iloc[0],
+                "class_name": class_name,
+                "n_images": int(group["stem"].nunique()),
+                "n_rois": int(group["n_rois"].sum()),
+                "roi_area_fraction_mean": self._safe_mean(group["roi_area_fraction"]),
+            }
+            for metric in self.ROI_METRICS:
+                values = pd.to_numeric(group[metric], errors="coerce").dropna()
+                row[f"{metric}_mean"] = float(values.mean()) if len(values) else float("nan")
+                row[f"{metric}_std"] = float(values.std()) if len(values) > 1 else float("nan")
+                row[f"{metric}_sem"] = float(values.sem()) if len(values) > 1 else float("nan")
+                row[f"{metric}_median"] = float(values.median()) if len(values) else float("nan")
+            summary_rows.append(row)
+        per_class = pd.DataFrame(summary_rows)
+        if not per_class.empty:
+            per_class["_order"] = per_class["class_name"].map(class_order.index)
+            per_class = (
+                per_class.sort_values(["modality", "source", "_order"], kind="stable")
+                .drop(columns="_order")
+                .reset_index(drop=True)
+            )
+        per_class.to_csv(output_dir / "per_class.csv", index=False)
+
+        # RGB vs IR, stems where the class is annotated in both modalities. Positive: higher on RGB.
+        comparison_rows = []
+        if {"VIS", "IR"} <= set(all_rows["modality"]):
+            keys = ["stem", "class_name", "source"]
+            paired = all_rows[all_rows["modality"] == "VIS"].merge(
+                all_rows[all_rows["modality"] == "IR"], on=keys, suffixes=("_rgb", "_ir")
+            )
+            for _, row in paired.iterrows():
+                for metric in self.ROI_METRICS:
+                    score_rgb, score_ir = float(row[f"{metric}_rgb"]), float(row[f"{metric}_ir"])
+                    comparison_rows.append({
+                        "stem": row["stem"],
+                        "metric_type": f"roi_{row['source']}_{row['class_name']}",
+                        "metric_name": metric,
+                        "score_rgb": score_rgb,
+                        "score_ir": score_ir,
+                        "delta_rgb_ir": score_rgb - score_ir,
+                    })
+        all_results = self._ensure_columns(pd.DataFrame(comparison_rows), comparison_columns)
+        all_results.to_csv(output_dir / "all_results.csv", index=False)
+
+        with (output_dir / "settings.json").open("w", encoding="utf-8") as file:
+            first = next(iter(results.values()))
+            json.dump(self._to_json_compatible({
+                "model": first["model"],
+                "msdb_dataset": first["msdb_dataset"],
+                "sigma_deg": first["sigma_deg"],
+                "class_names": first["class_names"],
+                "centerbias_paths": {m: str(r["centerbias_path"]) for m, r in results.items()},
+                "n_images": {m: len({row["stem"] for row in r["rows"]}) for m, r in results.items()},
+            }), file, indent=2)
+
+        if not per_class.empty:
+            self._plot_roi_per_class(per_class, class_order, output_dir / "per_class.png")
+
+        if visualise:
+            stems = sorted(set.intersection(*(set(r["maps"]) for r in results.values())))
+            if not stems:
+                print("No maps kept (keep_maps=False): skipping the ROI visualisations.")
+            if n_visualisations is not None and n_visualisations < len(stems):
+                rng = np.random.default_rng(seed)
+                stems = sorted(rng.choice(stems, size=n_visualisations, replace=False))
+            for stem in tqdm(stems, desc="Saving ROI visualisations"):
+                self._plot_deepgaze_roi_example(
+                    results, stem, all_rows, output_dir / "visualisation" / f"{stem}.png"
+                )
+
+        return per_class
+
+
+    @staticmethod
+    def _roi_class_order(results: Mapping[str, Mapping[str, Any]]) -> list[str]:
+        names = {}
+        for modality_results in results.values():
+            names.update(modality_results["class_names"])
+        return [names[c] for c in sorted(names)] + ["all"]
+
+
+    @classmethod
+    def _roi_style(cls, class_index: int) -> tuple[str, str]:
+        """(colour, linestyle) of the class at this position among the sorted class ids."""
+        if class_index < len(cls.ROI_COLORS):
+            return cls.ROI_COLORS[class_index], "-"
+        return "#ffffff", "--"
+
+
+    @classmethod
+    def _plot_roi_per_class(cls, per_class: pd.DataFrame, class_order: list[str], output_path: Path) -> None:
+        """
+        2 x 2 grid: rows = ratio, normalized ratio; columns = modality. One group of bars per
+        class (mean over the images containing it, error bar = sem), one bar per source.
+        """
+        sources = [s for s in cls.ROI_SOURCE_COLORS if s in set(per_class["source"])]
+        modalities = [m for m in ("VIS", "IR") if m in set(per_class["modality"])]
+        classes = [c for c in class_order if c in set(per_class["class_name"])]
+        metrics = (("ratio", "Mass in the ROI / total mass"),
+                   ("normalized_ratio", "Normalized ratio (1 = chance)"))
+
+        fig, axes = plt.subplots(
+            len(metrics), len(modalities),
+            figsize=(max(6.0, 0.9 * len(classes)) * len(modalities), 4.2 * len(metrics)),
+            sharey="row", squeeze=False, layout="constrained",
+        )
+        x = np.arange(len(classes))
+        width = 0.8 / len(sources)
+        for row, (metric, ylabel) in enumerate(metrics):
+            for col, modality in enumerate(modalities):
+                ax = axes[row, col]
+                table = per_class[per_class["modality"] == modality].set_index(["source", "class_name"])
+                for k, source in enumerate(sources):
+                    means = [table[f"{metric}_mean"].get((source, c), np.nan) for c in classes]
+                    sems = [table[f"{metric}_sem"].get((source, c), np.nan) for c in classes]
+                    ax.bar(x + (k - (len(sources) - 1) / 2) * width, means, width * 0.92,
+                           yerr=sems, color=cls.ROI_SOURCE_COLORS[source], label=source,
+                           error_kw={"elinewidth": 1, "capsize": 2, "ecolor": "0.3"})
+                if metric == "normalized_ratio":
+                    ax.axhline(1.0, color="0.4", linewidth=1, linestyle="--", zorder=0)
+                n_images = [
+                    int(table["n_images"].get((sources[0], c), 0)) if sources else 0 for c in classes
+                ]
+                ax.set_xticks(x, [f"{c}\n(n={n})" for c, n in zip(classes, n_images)],
+                              rotation=45 if len(classes) > 6 else 0, ha="right" if len(classes) > 6 else "center",
+                              fontsize=8)
+                ax.grid(axis="y", color="0.9", linewidth=0.8)
+                ax.set_axisbelow(True)
+                ax.spines[["top", "right"]].set_visible(False)
+                if col == 0:
+                    ax.set_ylabel(ylabel)
+                if row == 0:
+                    ax.set_title(modality)
+        handles, labels = axes[0, 0].get_legend_handles_labels()
+        fig.legend(handles, labels, frameon=False, fontsize=9, ncol=len(sources), loc="outside lower center")
+        fig.suptitle("ROI metrics per class (mean over the images containing the class, ± sem)")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, dpi=150)
+        plt.close(fig)
+
+
+    @classmethod
+    def _plot_deepgaze_roi_example(
+        cls,
+        results: Mapping[str, Mapping[str, Any]],
+        stem: str,
+        all_rows: pd.DataFrame,
+        output_path: Path,
+        dpi: int = 150,
+    ) -> None:
+        """
+        One row per modality: stimulus with the ROIs and the fixations | DeepGaze | human saliency,
+        both maps with the ROIs. The two maps of a row share one colour scale.
+        """
+        from matplotlib.lines import Line2D
+        from matplotlib.patches import Rectangle
+
+        modalities = [m for m in ("VIS", "IR") if m in results and stem in results[m]["maps"]]
+        class_ids = sorted({c for r in results.values() for c in r["class_names"]})
+        class_names = {c: n for r in results.values() for c, n in r["class_names"].items()}
+
+        first = results[modalities[0]]["maps"][stem]["deepgaze"]
+        height, width = first.shape
+        panel_w = 4.6
+        fig, axes = plt.subplots(
+            len(modalities), 3, figsize=(3 * panel_w + 1.0, len(modalities) * panel_w * height / width + 1.6),
+            squeeze=False, layout="constrained",
+        )
+
+        def draw_rois(ax, rois, labels: bool):
+            for roi in rois:
+                color, linestyle = cls._roi_style(class_ids.index(roi.class_id))
+                ax.add_patch(Rectangle((roi.x_min, roi.y_min), roi.width, roi.height, fill=False,
+                                       edgecolor=color, linestyle=linestyle, linewidth=1.2))
+                if labels:
+                    ax.text(roi.x_min, roi.y_min - 1, class_names[roi.class_id], color=color, fontsize=5,
+                            va="bottom", ha="left",
+                            bbox={"facecolor": "black", "alpha": 0.5, "pad": 0.5, "linewidth": 0})
+
+        def roi_summary(modality, source):
+            rows = all_rows[(all_rows["modality"] == modality) & (all_rows["stem"] == stem)
+                            & (all_rows["source"] == source) & (all_rows["class_name"] == "all")]
+            if rows.empty:
+                return "no ROI"
+            row = rows.iloc[0]
+            return f"{row['ratio']:.1%} of the mass in ROIs ({row['roi_area_fraction']:.1%} of the area)"
+
+        for r, modality in enumerate(modalities):
+            res = results[modality]
+            maps = res["maps"][stem]
+            rois = res["rois"][stem]
+            image_path = res["image_paths"].get(stem)
+            if image_path is not None and Path(image_path).exists():
+                stimulus = Loader.load_image(image_path)
+            else:
+                stimulus = np.full(maps["deepgaze"].shape, 128, dtype=np.uint8)
+            grey = stimulus[..., :3].mean(axis=2) if stimulus.ndim == 3 else stimulus
+            vmax = float(max(maps["deepgaze"].max(), maps["human"].max()))
+            norm = plt.Normalize(0, vmax)
+
+            ax = axes[r, 0]
+            ax.imshow(stimulus, cmap="gray")
+            draw_rois(ax, rois, labels=True)
+            img = res["fixations"].get(stem)
+            if img is not None:
+                ax.scatter(img.x, img.y, s=8, c="yellow", edgecolors="black", linewidths=0.4)
+            n_fix = 0 if img is None else len(img.x)
+            ax.set_title(f"{modality} {stem}: {len(rois)} ROIs, {n_fix} fixations", fontsize=9)
+
+            for c, (source, label) in enumerate((("deepgaze", f"DeepGaze {res['model']}"),
+                                                 ("human", f"Human saliency (sigma = {res['sigma_deg']:g} deg)")),
+                                                start=1):
+                ax = axes[r, c]
+                ax.imshow(grey, cmap="gray", alpha=0.6)
+                rgba = plt.get_cmap("inferno")(norm(maps[source]))
+                rgba[..., 3] = 0.85 * np.sqrt(np.clip(maps[source] / vmax, 0, 1))
+                ax.imshow(rgba)
+                draw_rois(ax, rois, labels=False)
+                ax.set_title(f"{label}\n{roi_summary(modality, source)}", fontsize=9)
+            # One colour bar for the row, so the three panels keep the same size.
+            cb = fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap="inferno"), ax=axes[r, :],
+                              fraction=0.02, pad=0.01, label="probability per pixel")
+            cb.formatter.set_powerlimits((0, 0))
+            cb.update_ticks()
+
+        for ax in axes.ravel():
+            ax.set_xticks([])
+            ax.set_yticks([])
+
+        present = sorted({roi.class_id for m in modalities for roi in results[m]["rois"][stem]})
+        handles = [
+            Line2D([], [], color=cls._roi_style(class_ids.index(c))[0],
+                   linestyle=cls._roi_style(class_ids.index(c))[1], label=class_names[c])
+            for c in present
+        ]
+        if handles:
+            legend = fig.legend(handles=handles, loc="outside lower center", ncol=min(len(handles), 9),
+                                frameon=True, fontsize=8, title="ROI class")
+            # Dark frame, so the white boxes of the 9th+ classes stay visible.
+            legend.get_frame().set_facecolor("0.25")
+            plt.setp(legend.get_texts(), color="white")
+            legend.get_title().set_color("white")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, dpi=dpi)
+        plt.close(fig)

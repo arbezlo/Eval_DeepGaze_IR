@@ -23,12 +23,13 @@ class Metrics:
                 "auc_judd": self.auc_judd,
                 "ig": self.information_gain,
             },
-            # "roi": {
-            #     "mass": self.roi_mass,
-            #     "density": self.roi_density,
-            #     "ratio": self.roi_ratio,
-            #     "normalized_ratio": self.roi_normalized_ratio,
-            # }
+            # Called as fn(saliency_map, rois), see Comparator.run_deepgaze_roi.
+            "roi": {
+                "mass": self.roi_mass,
+                "density": self.roi_density,
+                "ratio": self.roi_ratio,
+                "normalized_ratio": self.roi_normalized_ratio,
+            },
         }
 
     # ------------------------------------------------------------------
