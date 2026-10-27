@@ -74,8 +74,12 @@ class Saver:
             "stem",
             "metric_type",
             "metric_name",
-            "score_perm_mean",
+            "score_perm_mean",  # delta = intra - inter
             "score_perm_std",
+            "intra_mean",
+            "intra_std",
+            "inter_mean",
+            "inter_std",
             "n_permutations",
             "N_fix_maps",
             "sigma",
@@ -88,6 +92,10 @@ class Saver:
             summary_measures=[
                 "score_perm_mean",
                 "score_perm_std",
+                "intra_mean",
+                "intra_std",
+                "inter_mean",
+                "inter_std",
             ],
         )
 
@@ -927,7 +935,8 @@ class Saver:
                                     "roi_<source>_<class>", metric_name = metric), so it can be
                                     passed to Analyzer.analyze_expe2
             per_class.png           ratio and normalized ratio per class, modality and source
-            visualisation/<stem>.png  stimulus, DeepGaze and human maps with the ROIs, VIS and IR
+            visualisation/<stem>.png  stimulus, DeepGaze and human maps (gold standard or 1 deg blur,
+                                    see settings.json) with the ROIs, VIS and IR
                                     (every stem, or n_visualisations random stems; needs the maps,
                                     i.e. keep_maps=True in run_deepgaze_roi)
 
@@ -1014,14 +1023,22 @@ class Saver:
             json.dump(self._to_json_compatible({
                 "model": first["model"],
                 "msdb_dataset": first["msdb_dataset"],
+                "human_map": first["human_map"],
                 "sigma_deg": first["sigma_deg"],
+                "gold_standard": {
+                    m: {"sigma_px": r["gold_standard_sigma_px"], "weights": r["gold_standard_weights"]}
+                    for m, r in results.items()
+                } if first["human_map"] == "gold_standard" else None,
                 "class_names": first["class_names"],
                 "centerbias_paths": {m: str(r["centerbias_path"]) for m, r in results.items()},
                 "n_images": {m: len({row["stem"] for row in r["rows"]}) for m, r in results.items()},
             }), file, indent=2)
 
         if not per_class.empty:
-            self._plot_roi_per_class(per_class, class_order, output_dir / "per_class.png")
+            self._plot_roi_per_class(
+                per_class, class_order, output_dir / "per_class.png",
+                labels={"human": f"human ({first['human_map']})"},
+            )
 
         if visualise:
             stems = sorted(set.intersection(*(set(r["maps"]) for r in results.values())))
@@ -1036,6 +1053,14 @@ class Saver:
                 )
 
         return per_class
+
+
+    @staticmethod
+    def _roi_human_label(modality_results: Mapping[str, Any]) -> str:
+        """Title of the human map of Comparator.run_deepgaze_roi."""
+        if modality_results["human_map"] == "gold_standard":
+            return f"Gold standard (sigma = {modality_results['gold_standard_sigma_px']:.1f} px)"
+        return f"Human saliency (sigma = {modality_results['sigma_deg']:g} deg)"
 
 
     @staticmethod
@@ -1055,7 +1080,13 @@ class Saver:
 
 
     @classmethod
-    def _plot_roi_per_class(cls, per_class: pd.DataFrame, class_order: list[str], output_path: Path) -> None:
+    def _plot_roi_per_class(
+        cls,
+        per_class: pd.DataFrame,
+        class_order: list[str],
+        output_path: Path,
+        labels: Mapping[str, str] | None = None,
+    ) -> None:
         """
         2 x 2 grid: rows = ratio, normalized ratio; columns = modality. One group of bars per
         class (mean over the images containing it, error bar = sem), one bar per source.
@@ -1081,7 +1112,7 @@ class Saver:
                     means = [table[f"{metric}_mean"].get((source, c), np.nan) for c in classes]
                     sems = [table[f"{metric}_sem"].get((source, c), np.nan) for c in classes]
                     ax.bar(x + (k - (len(sources) - 1) / 2) * width, means, width * 0.92,
-                           yerr=sems, color=cls.ROI_SOURCE_COLORS[source], label=source,
+                           yerr=sems, color=cls.ROI_SOURCE_COLORS[source], label=(labels or {}).get(source, source),
                            error_kw={"elinewidth": 1, "capsize": 2, "ecolor": "0.3"})
                 if metric == "normalized_ratio":
                     ax.axhline(1.0, color="0.4", linewidth=1, linestyle="--", zorder=0)
@@ -1162,7 +1193,7 @@ class Saver:
             else:
                 stimulus = np.full(maps["deepgaze"].shape, 128, dtype=np.uint8)
             grey = stimulus[..., :3].mean(axis=2) if stimulus.ndim == 3 else stimulus
-            vmax = float(max(maps["deepgaze"].max(), maps["human"].max()))
+            vmax = float(max(m.max() for m in maps.values()))
             norm = plt.Normalize(0, vmax)
 
             ax = axes[r, 0]
@@ -1175,10 +1206,13 @@ class Saver:
             ax.set_title(f"{modality} {stem}: {len(rois)} ROIs, {n_fix} fixations", fontsize=9)
 
             for c, (source, label) in enumerate((("deepgaze", f"DeepGaze {res['model']}"),
-                                                 ("human", f"Human saliency (sigma = {res['sigma_deg']:g} deg)")),
+                                                 ("human", cls._roi_human_label(res))),
                                                 start=1):
                 ax = axes[r, c]
                 ax.imshow(grey, cmap="gray", alpha=0.6)
+                if source not in maps:
+                    ax.set_title(f"{label}\nnot available for this image", fontsize=9)
+                    continue
                 rgba = plt.get_cmap("inferno")(norm(maps[source]))
                 rgba[..., 3] = 0.85 * np.sqrt(np.clip(maps[source] / vmax, 0, 1))
                 ax.imshow(rgba)

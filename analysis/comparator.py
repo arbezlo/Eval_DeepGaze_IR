@@ -1,5 +1,7 @@
 from __future__ import annotations
+import os
 from collections.abc import Mapping
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from tqdm import tqdm
 from pathlib import Path
 from math import tan, radians
@@ -8,8 +10,10 @@ import numpy as np
 import pandas as pd
 
 from analysis.metrics import Metrics
+from analysis.permutation import METRIC_KEYS, permutation_scores, to_sparse
 from analysis.gold_standard import (
     COMPONENTS,
+    gold_standard_map,
     LN2,
     CenterBias,
     GoldStandard,
@@ -28,6 +32,8 @@ from helpers.models import Dataset, Results, RoiData
 
 # Name of the group made of every ROI of an image, whatever its class.
 ALL_ROI_CLASSES = "all"
+# Human reference maps of Comparator.run_deepgaze_roi.
+HUMAN_MAPS = ("gold_standard", "1deg")
 # Stand-in for an image without annotation.
 _NO_ROIS = RoiData(image_id=0, image_stem="", image_modality="", rois=[])
 
@@ -304,7 +310,65 @@ class Comparator:
 
         return results
 
+    def _check_fast_metrics(self) -> None:
+        expected = {(t, m) for t in ("similarity", "predictivity") for m in self.metrics.registry[t]}
+        if expected != set(METRIC_KEYS):
+            raise ValueError(
+                "analysis/permutation.py implements the metrics "
+                f"{sorted(METRIC_KEYS)} but Metrics.registry has {sorted(expected)}."
+            )
+
     def _compute_permutation_scores(
+        self,
+        data_visible: Dataset,
+        data_infrared: Dataset,
+        stem: str | int,
+        sigma: float,
+        n_permutations: int = 1000,
+        seed: int | None = 42,
+    ) -> dict:
+        """
+        Split-half permutation test of one stem (fast version, see analysis/permutation.py).
+        Returns {modality: {metric_type: {metric_name: {"intra", "inter", "delta"}}}}, each an
+        array of shape (n_permutations,), with delta = intra - inter.
+        """
+        self._check_fast_metrics()
+        args = self._permutation_args(data_visible, data_infrared, stem, sigma)
+        scores = permutation_scores(*args, n_permutations, seed, self.metrics.epsilon)
+        return self._scores_to_dict(scores)
+
+    def _permutation_args(self, data_visible: Dataset, data_infrared: Dataset, stem, sigma):
+        visible_maps = list(self.builder.build_participant_maps(data_visible, stem).values())
+        infrared_maps = list(self.builder.build_participant_maps(data_infrared, stem).values())
+        if not visible_maps or not infrared_maps:
+            raise ValueError(f"No participant data available for stem '{stem}'.")
+        shape = visible_maps[0].shape
+        if any(m.shape != shape for m in visible_maps + infrared_maps):
+            raise ValueError(f"Stem '{stem}': fixation maps of different sizes.")
+        return (
+            [to_sparse(m) for m in visible_maps],
+            [to_sparse(m) for m in infrared_maps],
+            shape,
+            float(sigma),
+        )
+
+    def _scores_to_dict(self, scores: dict[str, dict[str, np.ndarray]]) -> dict:
+        """
+        {modality: {"intra"|"inter"|"delta": (n_permutations, n_metrics)}}
+        -> {modality: {metric_type: {metric_name: {"intra"|"inter"|"delta": (n_permutations,)}}}}
+        """
+        out = {
+            modality: {metric_type: {} for metric_type in ("similarity", "predictivity")}
+            for modality in scores
+        }
+        for modality, arrays in scores.items():
+            for column, (metric_type, metric_name) in enumerate(METRIC_KEYS):
+                out[modality][metric_type][metric_name] = {
+                    kind: values[:, column] for kind, values in arrays.items()
+                }
+        return out
+
+    def _compute_permutation_scores_reference(
     self,
     data_visible: Dataset,
     data_infrared: Dataset,
@@ -312,13 +376,18 @@ class Comparator:
     sigma: float,
     n_permutations: int = 1000,
     seed: int | None = 42,
-    ) -> dict[str, dict[str, np.ndarray]]:
-        
+    ) -> dict:
+        """
+        Original (slow) implementation, kept to check the fast one on a few stems:
+        same seed -> same splits -> same scores, up to floating point rounding.
+        Same output as _compute_permutation_scores.
+        """
+
         def compute_inter_score(vis_g1,vis_g2, ir_g1,ir_g2, sigma):
                 inter_1 = self._compute_human_scores(vis_g1, ir_g1, sigma)
                 inter_2 = self._compute_human_scores(vis_g2, ir_g2, sigma)
                 inter_3 = self._compute_human_scores(vis_g1, ir_g2, sigma)
-                inter_4 = self._compute_human_scores(vis_g2, ir_g2, sigma)
+                inter_4 = self._compute_human_scores(vis_g2, ir_g1, sigma)  # was (vis_g2, ir_g2): duplicate of inter_2
                 
                 inter_score = {
                         metric_type: {
@@ -368,18 +437,10 @@ class Comparator:
 
         rng = np.random.default_rng(seed)
 
-        permutations_scores = {
-                modality : {
-                    metric_type: {
-                    metric_name: np.empty(n_permutations, dtype=float)
-                    for metric_name in self.metrics.registry[metric_type]
-                    }
-                for metric_type in ("similarity", "predictivity")
-                }
-            for modality in ('VIS','IR')
-        }
+        size = (n_permutations, len(METRIC_KEYS))
+        inter_all = np.empty(size)
+        intra_all = {"VIS": np.empty(size), "IR": np.empty(size)}
 
-     
 
         for permutation_index in range(n_permutations):
             visible_indices = rng.permutation(n_visible)
@@ -410,20 +471,6 @@ class Comparator:
             
             
 
-            #Compute the score between those maps
-            intra_RGB_scores = self._compute_human_scores(
-                visible_fixation_map_group_1,
-                visible_fixation_map_group_2,
-                sigma
-            )
-            intra_IR_scores = self._compute_human_scores(
-                infrared_fixation_map_group_1,
-                infrared_fixation_map_group_2,
-                sigma
-            )
-
-            
-
             #Compute the inter scores
             inter_score = compute_inter_score(visible_fixation_map_group_1,
                                               visible_fixation_map_group_2,
@@ -436,23 +483,16 @@ class Comparator:
             infrared_intra_score = self._compute_human_scores(infrared_fixation_map_group_1, infrared_fixation_map_group_2, sigma)
 
 
-            #Logs the score for test computation
-            for metric_type in ("similarity", "predictivity"):
-                for metric_name in self.metrics.registry[metric_type]:
-                    
-                    inter_value = inter_score[metric_type][metric_name]
-                    visible_intra_value = visible_intra_score[metric_type][metric_name]
-                    infrared_intra_value = infrared_intra_score[metric_type][metric_name] 
+            #Logs the scores for test computation
+            for column, (metric_type, metric_name) in enumerate(METRIC_KEYS):
+                inter_all[permutation_index, column] = inter_score[metric_type][metric_name]
+                intra_all["VIS"][permutation_index, column] = visible_intra_score[metric_type][metric_name]
+                intra_all["IR"][permutation_index, column] = infrared_intra_score[metric_type][metric_name]
 
-                    delta_rgb = visible_intra_value - inter_value
-                    delta_ir = infrared_intra_value - inter_value
-
-
-                    permutations_scores['VIS'][metric_type][metric_name][permutation_index] = delta_rgb
-                    permutations_scores['IR'][metric_type][metric_name][permutation_index] = delta_ir
-
-
-        return permutations_scores
+        return self._scores_to_dict({
+            modality: {"intra": intra, "inter": inter_all, "delta": intra - inter_all}
+            for modality, intra in intra_all.items()
+        })
 
     def run_expe1(
         self,
@@ -460,7 +500,16 @@ class Comparator:
         visible_df: pd.DataFrame,
         n_permutations: int = 1000,
         seed: int | None = 42,
+        n_jobs: int | None = -1,
     ) -> Results:
+        """
+        n_jobs : number of stems processed in parallel (one process each). -1 or None: all CPU
+                 cores; 1: no parallelism. Lower it if memory runs out (each process holds the
+                 blurred maps of every participant of one stem).
+        Every stem uses its own generator seeded with `seed`, so the results do not depend on
+        n_jobs.
+        """
+        self._check_fast_metrics()
         data_infrared = self.loader.load_dataset(infrared_df)
         data_visible = self.loader.load_dataset(visible_df)
 
@@ -480,38 +529,65 @@ class Comparator:
             for modality in ("VIS","IR")
         }
 
-        for stem in tqdm(stems, desc="Running human-human analysis"): # iter over scenes 
-            #Define the number of images to use for computations in the permutations  
-            visible_user = len(self.builder.build_participant_maps(data_visible, stem).keys())
-            infrared_user = len(self.builder.build_participant_maps(data_infrared, stem).keys())
-            
-            N = int(min(np.floor(visible_user/2),np.floor(infrared_user/2)))
-
-            #Construct the blurring kernel associated to the current scene
-            stimuli_width = dimensions[stem]["stimuli_width"]
-            image_width = dimensions[stem]["image_width"]
-            sigma = self._compute_sigma(self.sigma_deg, stimuli_width, image_width)
-            
-            
-            #Compute the intra-modality score
-            permutation_scores = self._compute_permutation_scores(
-                data_visible=data_visible,
-                data_infrared=data_infrared,
-                stem=stem,
-                sigma=sigma,
-                n_permutations=n_permutations,
-                seed=seed,
+        # Per stem: sigma of the blurring kernel and arguments of the permutation test.
+        sigmas = {
+            stem: self._compute_sigma(
+                self.sigma_deg,
+                dimensions[stem]["stimuli_width"],
+                dimensions[stem]["image_width"],
             )
-            
+            for stem in stems
+        }
+        jobs = {
+            stem: self._permutation_args(data_visible, data_infrared, stem, sigmas[stem])
+            for stem in stems
+        }
+
+        if n_jobs in (None, -1):
+            n_workers = os.cpu_count() or 1
+        else:
+            n_workers = max(1, int(n_jobs))
+        n_workers = max(1, min(n_workers, len(stems)))
+        eps = self.metrics.epsilon
+
+        if n_workers == 1:
+            finished = (
+                (stem, permutation_scores(*jobs[stem], n_permutations, seed, eps))
+                for stem in stems
+            )
+            all_scores = dict(tqdm(finished, total=len(stems), desc="Running human-human analysis"))
+        else:
+            all_scores = {}
+            with ProcessPoolExecutor(max_workers=n_workers) as pool:
+                futures = {
+                    pool.submit(permutation_scores, *jobs[stem], n_permutations, seed, eps): stem
+                    for stem in stems
+                }
+                for future in tqdm(
+                    as_completed(futures), total=len(futures), desc="Running human-human analysis"
+                ):
+                    all_scores[futures[future]] = future.result()
+
+        for stem in stems:
+            # Number of participants per group in the permutations
+            N = min(len(jobs[stem][0]) // 2, len(jobs[stem][1]) // 2)
+            sigma = sigmas[stem]
+            stem_scores = self._scores_to_dict(all_scores[stem])
+
             for modality in ("VIS", "IR"):
                 for metric_type in ("similarity", "predictivity"):
                     for metric_name in self.metrics.registry[metric_type]:
-                        
-                        perm_scores = permutation_scores[modality][metric_type][metric_name]
-                        
+
+                        scores = stem_scores[modality][metric_type][metric_name]
+
                         results[modality][metric_type][metric_name][stem] = {
-                            "score_perm_mean": float(np.nanmean(perm_scores)),
-                            "score_perm_std": float(np.nanstd(perm_scores)),
+                            # delta = intra - inter
+                            "score_perm_mean": float(np.nanmean(scores["delta"])),
+                            "score_perm_std": float(np.nanstd(scores["delta"])),
+                            "intra_mean": float(np.nanmean(scores["intra"])),
+                            "intra_std": float(np.nanstd(scores["intra"])),
+                            "inter_mean": float(np.nanmean(scores["inter"])),
+                            "inter_std": float(np.nanstd(scores["inter"])),
                             "n_permutations": n_permutations,
                             "sigma": float(sigma),
                             "N_fix_maps": N,
@@ -1006,6 +1082,8 @@ class Comparator:
         class_names: Mapping[int, str] | None = None,
         stems: list[str] | None = None,
         keep_maps: bool = True,
+        human_map: str = "gold_standard",
+        gold_standard: Mapping[str, Mapping] | str | Path | None = None,
     ) -> dict[str, dict]:
         """
         Region-of-interest (ROI) analysis of the DeepGaze prediction on every image of both
@@ -1016,7 +1094,7 @@ class Comparator:
         union of all the boxes (class "all"). Four maps ("source") are scored the same way:
 
             deepgaze    DeepGaze density (sums to 1), with the modality center bias as prior
-            human       human saliency map: fixations blurred by a Gaussian of self.sigma_deg
+            human       human fixation density, see human_map
             fixations   raw human fixation counts (ratio = fraction of the fixations in the ROI)
             centerbias  the center-bias prior given to DeepGaze, alone (control: how much of the
                         ROI mass is explained by the position of the ROI in the image)
@@ -1029,6 +1107,13 @@ class Comparator:
         class_names : {class_id: name}; missing ids are named "class_<id>".
         stems       : restrict the analysis to these stems (e.g. a few images for a test run).
         keep_maps   : keep the maps, ROIs and fixations per stem for Saver.save_deepgaze_roi.
+        human_map   : "gold_standard": the gold-standard density of the image (fitted KDE bandwidth
+                      and mixture weights, all participants; see analysis/gold_standard.py);
+                      "1deg": the fixations blurred by a Gaussian of self.sigma_deg of visual angle.
+        gold_standard : with human_map="gold_standard", the output of
+                      Comparator.compute_gold_standard, or the output directory of
+                      Saver.save_gold_standard_results (containing VIS/ and IR/). Stems without a
+                      gold standard (fewer than two participants) get no "human" rows.
 
         Returns {"VIS": ..., "IR": ...}, each with "rows" (one dict per stem, class and source),
         the run settings and, with keep_maps, per-stem "maps", "rois", "fixations", "image_paths".
@@ -1068,10 +1153,22 @@ class Comparator:
                 print(f"Warning: classes {absent} have no ROI in the analysed images.")
         names = {c: str((class_names or {}).get(c, f"class_{c}")) for c in classes}
 
+        if human_map not in HUMAN_MAPS:
+            raise ValueError(f"Unknown human_map {human_map!r}, expected one of {HUMAN_MAPS}")
+        if human_map == "gold_standard" and gold_standard is None:
+            raise ValueError('human_map="gold_standard" needs the gold_standard results or directory.')
+
         roi_metrics = self.metrics.registry["roi"]
 
         results = {}
         for modality in ("VIS", "IR"):
+            gold = None
+            if human_map == "gold_standard":
+                gold = (
+                    gold_standard[modality]
+                    if isinstance(gold_standard, Mapping)
+                    else self._load_gold_standard(Path(gold_standard) / modality, data[modality])
+                )
             deepgaze = DeepGaze(
                 centerbias_path=centerbias_paths[modality], model=model, msdb_dataset=msdb_dataset
             )
@@ -1100,12 +1197,27 @@ class Comparator:
                         f"{modality} {stem}: DeepGaze map {log_density.shape} and fixation map "
                         f"{fixation_map.shape} have different sizes."
                     )
+                if human_map == "1deg":
+                    human = self.builder.build_saliency_map(fixation_map, sigma).astype(np.float64)
+                elif stem in gold["fixations"]:
+                    human = np.exp(gold_standard_map(
+                        gold["fixations"][stem], gold["gold_standard"], gold["centerbiases"][stem]
+                    ))
+                else:
+                    print(f"{modality} {stem}: no gold standard (fewer than two participants), "
+                          "no human ROI metrics.")
+                    human = None
                 stem_maps = {
                     "deepgaze": np.exp(log_density.astype(np.float64)),
-                    "human": self.builder.build_saliency_map(fixation_map, sigma).astype(np.float64),
+                    "human": human,
                     "fixations": fixation_map.astype(np.float64),
                     "centerbias": np.exp(deepgaze._resize_centerbias(height, width).astype(np.float64)),
                 }
+                if human is not None and human.shape != (height, width):
+                    raise ValueError(
+                        f"{modality} {stem}: gold standard {human.shape} and DeepGaze map "
+                        f"{log_density.shape} have different sizes."
+                    )
                 for source in ("deepgaze", "centerbias"):
                     stem_maps[source] /= stem_maps[source].sum()
 
@@ -1128,6 +1240,8 @@ class Comparator:
                         "n_participants": len(data[modality][stem].participants_data),
                     }
                     for source, saliency_map in stem_maps.items():
+                        if saliency_map is None:
+                            continue
                         rows.append({
                             **common,
                             "source": source,
@@ -1136,8 +1250,9 @@ class Comparator:
 
                 if keep_maps:
                     maps[stem] = {
-                        "deepgaze": stem_maps["deepgaze"].astype(np.float32),
-                        "human": stem_maps["human"].astype(np.float32),
+                        source: stem_maps[source].astype(np.float32)
+                        for source in ("deepgaze", "human")
+                        if stem_maps[source] is not None
                     }
                     rois_per_stem[stem] = rois
                     fixations[stem] = self._get_image_fixations(data[modality], stem)
@@ -1150,6 +1265,12 @@ class Comparator:
                 "msdb_dataset": msdb_dataset,
                 "centerbias_path": centerbias_paths[modality],
                 "sigma_deg": self.sigma_deg,
+                "human_map": human_map,
+                # Gold standard: KDE bandwidth (image px) and mixture weights.
+                "gold_standard_sigma_px": None if gold is None else float(gold["gold_standard"].sigma),
+                "gold_standard_weights": None if gold is None else {
+                    k: float(v) for k, v in gold["gold_standard"].weights.items()
+                },
                 "class_names": names,
                 "rows": rows,
                 # For the saver's visualisations.

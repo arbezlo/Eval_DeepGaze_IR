@@ -1,11 +1,12 @@
 import sys
 from pathlib import Path
 
+ROOT = Path().resolve().parents[0]
+
 if str(ROOT) not in sys.path:
         sys.path.append(str(ROOT))
 
 
-ROOT = Path().resolve().parents[0]
 
 from analysis.saver import Saver
 from analysis.comparator import Comparator
