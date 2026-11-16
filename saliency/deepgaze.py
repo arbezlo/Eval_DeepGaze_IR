@@ -82,6 +82,20 @@ class DeepGaze:
         centerbias -= logsumexp(centerbias)
         return centerbias.astype(np.float32)
     
+    def _centerbias_to_tensor(self, centerbias: np.ndarray, height: int, width: int) -> torch.Tensor:
+        """Per-call log-density prior -> normalised (1, H, W) tensor, without caching."""
+        centerbias = np.asarray(centerbias, dtype=np.float64)
+        if centerbias.shape != (height, width):
+            raise ValueError(f"Center bias of shape {centerbias.shape}, expected {(height, width)}.")
+        if not np.all(np.isfinite(centerbias)):
+            raise ValueError("Center bias contains NaN or infinite log-densities.")
+        centerbias = centerbias - logsumexp(centerbias)
+        return (
+            torch.from_numpy(centerbias.astype(np.float32))
+            .unsqueeze(0)
+            .to(device=self.device, dtype=torch.float32)
+        )
+
     def _resize_centerbias(self, height: int, width: int) -> np.ndarray:
 
         centerbias = cv2.resize(self.centerbias, (width, height), interpolation=cv2.INTER_LINEAR)
@@ -164,25 +178,35 @@ class DeepGaze:
         return np.exp(self.predict_log_density(image, pixel_per_dva))
 
 
-    def predict_log_density(self, image: np.ndarray, pixel_per_dva: Optional[float] = None) -> np.ndarray:
+    def predict_log_density(
+        self,
+        image: np.ndarray,
+        pixel_per_dva: Optional[float] = None,
+        centerbias: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
         """
         Natural-log probability per pixel, normalised over the image (used for information gains).
 
         pixel_per_dva : pixels of `image` per degree of visual angle, as it was displayed. Required
                         by DeepGaze MSDB, which rescales the image to fixed visual resolutions;
                         ignored by DeepGaze IIE.
+        centerbias    : log-density prior of this image, same (H, W) as `image`. Overrides the
+                        center bias given to the constructor for this call only.
         """
         if self.model_name == "MSDB" and pixel_per_dva is None:
             raise ValueError("DeepGaze MSDB needs the pixels per degree of visual angle of the image.")
 
         image = self._normalize_input(image)
         height, width = image.shape[:2]
-        
+
         image_tensor = (
             torch.from_numpy(image).permute(2, 0, 1).unsqueeze(0).to(device=self.device, dtype=torch.float32)
         )
 
-        centerbias_tensor = self._get_centerbias(height, width)
+        if centerbias is None:
+            centerbias_tensor = self._get_centerbias(height, width)
+        else:
+            centerbias_tensor = self._centerbias_to_tensor(centerbias, height, width)
 
         with torch.inference_mode():
             if self.model_name == "MSDB":
