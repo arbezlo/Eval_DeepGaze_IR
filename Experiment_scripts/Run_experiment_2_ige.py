@@ -62,6 +62,7 @@ def main():
         gold_standard=gold_standard,
         model=model,
         msdb_dataset=msdb_dataset,
+        centerbias_source=centerbias_source,
     )
 
     saver.save_deepgaze_ige(
@@ -79,6 +80,11 @@ if __name__ == "__main__":
                         default=None,
                         help="MSDB only: use the parameters learned for this dataset instead of the "
                              "average over its training datasets (default: average).")
+    parser.add_argument("--centerbias", choices=["gold", "file"], default="gold",
+                        help="Center-bias prior given to DeepGaze. 'gold' (default): the gold standard's "
+                             "leave-one-image-out center bias, i.e. the IG baseline itself. 'file': the "
+                             "fixed maps of <data>/centerbias/{infrared,visible}.npy (results go to a "
+                             "folder suffixed with _filecb).")
     args = parser.parse_args()
     if args.msdb_dataset is not None and args.model != "MSDB":
         parser.error("--msdb-dataset only applies to --model MSDB")
@@ -91,6 +97,9 @@ if __name__ == "__main__":
         if args.msdb_dataset is not None:
             msdb_dataset = getattr(MSDBDataset, args.msdb_dataset)
             ige_folder = f"ige_msdb_{args.msdb_dataset.lower()}"
+    centerbias_source = args.centerbias
+    if centerbias_source == "file":
+        ige_folder += "_filecb"
 
     # Access Paths
     data_dir = ROOT / "DATA_OCCULO_2026" / "2026" / "paired"
@@ -102,6 +111,7 @@ if __name__ == "__main__":
     annotations_json = data_dir / "metadata" / "annotations.json"
     visible_path = data_dir / "dataframes" / "fixations_visible.csv"
     infrared_path = data_dir / "dataframes" / "fixations_infrared.csv"
+    # Only used with --centerbias file.
     infrared_centerbias_path = data_dir / "centerbias" / "infrared.npy"
     visible_centerbias_path = data_dir / "centerbias" / "visible.npy"
 

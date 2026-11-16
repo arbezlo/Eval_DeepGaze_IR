@@ -13,6 +13,7 @@ from analysis.metrics import Metrics
 from analysis.permutation import METRIC_KEYS, permutation_scores, to_sparse
 from analysis.gold_standard import (
     COMPONENTS,
+    _centerbias_log_map,
     gold_standard_map,
     LN2,
     CenterBias,
@@ -937,11 +938,12 @@ class Comparator:
         visible_df: pd.DataFrame,
         infrared_image_dir: Path,
         visible_image_dir: Path,
-        infrared_centerbias_path: Path,
-        visible_centerbias_path: Path,
         gold_standard: Mapping[str, Mapping] | str | Path,
+        infrared_centerbias_path: Path | None = None,
+        visible_centerbias_path: Path | None = None,
         model: str = "IIE",
         msdb_dataset: int | None = None,
+        centerbias_source: str = "gold",
     ) -> dict[str, dict]:
         """
         Information gain explained (IGE) by DeepGaze on every image of both modalities,
@@ -954,8 +956,15 @@ class Comparator:
         information gains are measured against the same baseline. The baseline of each image is
         built only from the fixations on the other images of the same modality.
 
-        DeepGaze gets the stimulus of its modality (IR images are duplicated to 3 channels) and
-        the center bias of that modality as prior (infrared_centerbias_path, visible_centerbias_path).
+        DeepGaze gets the stimulus of its modality (IR images are duplicated to 3 channels) and a
+        center-bias prior chosen by `centerbias_source`:
+            "gold" : (default) the gold standard's center bias of the image, i.e. the baseline itself
+                     (leave-one-image-out, fitted bandwidth and uniform weight) put on the pixel grid.
+                     DeepGaze then has the same image-independent knowledge as the baseline, so
+                     IG_model only measures what it gains from the image content.
+            "file" : one fixed map per modality, loaded from infrared_centerbias_path and
+                     visible_centerbias_path. Not leave-one-image-out, and not the baseline, so
+                     IG_model also includes the gain or loss of that prior against the baseline.
 
         gold_standard : output of Comparator.compute_gold_standard, or the output directory of
                         Saver.save_gold_standard_results (containing VIS/ and IR/).
@@ -978,7 +987,14 @@ class Comparator:
             "IR": self.loader.load_dataset(infrared_df),
         }
         image_dirs = {"VIS": Path(visible_image_dir), "IR": Path(infrared_image_dir)}
-        centerbias_paths = {"VIS": Path(visible_centerbias_path), "IR": Path(infrared_centerbias_path)}
+        if centerbias_source == "gold":
+            centerbias_paths = {"VIS": None, "IR": None}
+        elif centerbias_source == "file":
+            if infrared_centerbias_path is None or visible_centerbias_path is None:
+                raise ValueError("centerbias_source='file' needs infrared_centerbias_path and visible_centerbias_path.")
+            centerbias_paths = {"VIS": Path(visible_centerbias_path), "IR": Path(infrared_centerbias_path)}
+        else:
+            raise ValueError(f"Unknown centerbias_source {centerbias_source!r}, expected 'gold' or 'file'.")
         modality_names = {
             "VIS": self.index.normalize_modality("visible"),
             "IR": self.index.normalize_modality("infrared"),
@@ -1017,8 +1033,14 @@ class Comparator:
                 # Image pixels per degree of visual angle, as displayed during the experiment.
                 dims = data[modality][stem].dimensions_data
                 pixel_per_dva = self._compute_sigma(1.0, dims.stimuli_width, dims.image_width)
+                # "gold": the baseline of this image on the pixel grid, as DeepGaze's prior.
+                prior = (
+                    _centerbias_log_map(centerbias, img.width, img.height)
+                    if centerbias_source == "gold"
+                    else None
+                )
                 log_density = deepgaze.predict_log_density(
-                    self.loader.load_image(image_path), pixel_per_dva=pixel_per_dva
+                    self.loader.load_image(image_path), pixel_per_dva=pixel_per_dva, centerbias=prior
                 )
 
                 model_ig = model_information_gain(img, log_density, centerbias)
@@ -1050,6 +1072,7 @@ class Comparator:
             results[modality] = {
                 "model": model,
                 "msdb_dataset": msdb_dataset,
+                "centerbias_source": centerbias_source,
                 "centerbias_path": centerbias_paths[modality],
                 "explainable_ig_bits": explainable_ig_bits,
                 "naive_ig_bits": naive_ig_bits,

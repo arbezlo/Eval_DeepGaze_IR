@@ -343,7 +343,13 @@ class Saver:
                 "ll_model_bits": self._safe_mean(df["ll_model_bits"]),
                 "model": modality_results["model"],
                 "msdb_dataset": modality_results["msdb_dataset"],
-                "centerbias_path": str(modality_results["centerbias_path"]),
+                # DeepGaze's prior: "gold" (the baseline itself) or "file" (centerbias_path).
+                "centerbias_source": modality_results.get("centerbias_source", "file"),
+                "centerbias_path": (
+                    str(modality_results["centerbias_path"])
+                    if modality_results["centerbias_path"] is not None
+                    else ""
+                ),
             })
 
             stems = example_stems or list(rng.choice(
