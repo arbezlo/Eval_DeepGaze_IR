@@ -97,12 +97,12 @@ if __name__ == "__main__":
 
     images_dir = data_dir / "images"
     output_dir = ROOT / "outputs"
-    output_dir_expe2 = output_dir / "expe2_ige"
+    output_dir_expe2 = output_dir / "expe2_MiT1003_ige"
     metadata_json = data_dir / "metadata" / "metadata.json"
     annotations_json = data_dir / "metadata" / "annotations.json"
     visible_path = data_dir / "dataframes" / "fixations_visible.csv"
     infrared_path = data_dir / "dataframes" / "fixations_infrared.csv"
-    infrared_centerbias_path = data_dir / "centerbias" / "infrared.npy"
-    visible_centerbias_path = data_dir / "centerbias" / "visible.npy"
+    infrared_centerbias_path = ROOT / "centerbias_mit1003.npy" #data_dir / "centerbias" / "infrared.npy"
+    visible_centerbias_path = ROOT / "centerbias_mit1003.npy" #data_dir / "centerbias" / "visible.npy"
 
     main()
