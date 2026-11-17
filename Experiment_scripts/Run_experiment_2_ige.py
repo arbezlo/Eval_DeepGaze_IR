@@ -63,6 +63,7 @@ def main():
         model=model,
         msdb_dataset=msdb_dataset,
         centerbias_source=centerbias_source,
+        grayscale=grayscale,
     )
 
     saver.save_deepgaze_ige(
@@ -85,6 +86,12 @@ if __name__ == "__main__":
                              "leave-one-image-out center bias, i.e. the IG baseline itself. 'file': the "
                              "fixed maps of <data>/centerbias/{infrared,visible}.npy (results go to a "
                              "folder suffixed with _filecb).")
+    parser.add_argument("--grayscale", action="store_true",
+                        help="Feed DeepGaze the grayscale version of the visible image (cv2 RGB2GRAY, "
+                             "repeated to 3 channels) for both modalities, and score it separately "
+                             "against the RGB gold standard (VIS: IGE(DG(GRAY), GOLD(RGB))) and the IR "
+                             "gold standard (IR: IGE(DG(GRAY), GOLD(IR))). Results go to a folder "
+                             "suffixed with _gray; the figures show the grayscale image.")
     args = parser.parse_args()
     if args.msdb_dataset is not None and args.model != "MSDB":
         parser.error("--msdb-dataset only applies to --model MSDB")
@@ -100,6 +107,9 @@ if __name__ == "__main__":
     centerbias_source = args.centerbias
     if centerbias_source == "file":
         ige_folder += "_filecb"
+    grayscale = args.grayscale
+    if grayscale:
+        ige_folder += "_gray"
 
     # Access Paths
     data_dir = ROOT / "DATA_OCCULO_2026" / "2026" / "paired"

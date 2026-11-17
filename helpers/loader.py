@@ -60,6 +60,24 @@ class Loader:
             image = cv2.cvtColor(image, cv2.COLOR_BGRA2RGBA)
 
         return image
+
+
+    @staticmethod
+    def to_grayscale_rgb(image: np.ndarray) -> np.ndarray:
+        """
+        Grayscale version of an RGB(A) image from load_image, as an (H, W, 3) uint8 image: converted
+        with cv2.COLOR_RGB2GRAY and the gray channel repeated 3 times. Three channels, so that
+        DeepGaze sees a colour-less RGB image rather than an IR image (DeepGaze._normalize_input
+        stretches the contrast of single-channel inputs). A single-channel image is only repeated.
+        """
+        image = np.asarray(image)
+        if image.ndim == 3 and image.shape[2] == 1:
+            image = image[..., 0]
+        if image.dtype != np.uint8:
+            image = np.clip(image, 0, 255).astype(np.uint8)
+        if image.ndim == 3:
+            image = cv2.cvtColor(np.ascontiguousarray(image[..., :3]), cv2.COLOR_RGB2GRAY)
+        return np.ascontiguousarray(np.repeat(image[..., None], 3, axis=2))
     
     def load_metadata(self, json_path: str | Path) -> Metadata:
         path = Path(json_path)

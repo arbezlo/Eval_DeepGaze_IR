@@ -263,7 +263,8 @@ class Saver:
 
             <modality>/images.csv       one row per stem (log-likelihoods, information gains, IGE)
             <modality>/visualisation/   gold standard, naive model and DeepGaze on n_examples random images
-            summary.csv                 one row per modality; "ige" is the dataset IGE (ratio of the
+            summary.csv                 one row per modality (the gold standard; "stimulus" is the
+                                        image given to DeepGaze: RGB, IR or GRAY); "ige" is the dataset IGE (ratio of the
                                         mean IGs), "ige_mean_per_image" the mean of the per-image ratios;
                                         "ige_naive*" are the same for the naive model (KDE, sigma = 1 deg),
                                         the baseline for the IGE of DeepGaze
@@ -327,6 +328,7 @@ class Saver:
 
             summary_rows.append({
                 "modality": modality,
+                "stimulus": modality_results.get("stimulus", ""),
                 "n_images": len(df),
                 "explainable_ig_bits": modality_results["explainable_ig_bits"],
                 "model_ig_bits": modality_results["model_ig_bits"],
@@ -472,6 +474,8 @@ class Saver:
         """
         2 x 2 figure: stimulus with fixations | gold standard
                       naive model             | DeepGaze
+
+        With modality_results["grayscale"], the stimulus is shown in grayscale, as given to DeepGaze.
         """
         img = modality_results["fixations"][stem]
         centerbias = modality_results["centerbiases"][stem]
@@ -485,7 +489,8 @@ class Saver:
         cls._plot_density_grid(
             img,
             modality_results["image_paths"].get(stem),
-            f"{modality} {stem}: {len(img.x)} fixations, {values['n_participants']} participants",
+            f"{modality} {stem}: {len(img.x)} fixations, {values['n_participants']} participants"
+            + (f"\nDeepGaze input: {modality_results['stimulus']}" if modality_results.get("stimulus") else ""),
             [
                 (f"Gold standard (sigma = {modality_results['gold_standard'].sigma:.1f} px)\n"
                  f"IG = {values['explainable_ig_bits']:.3f} bit/fix", gold, "density"),
@@ -500,6 +505,7 @@ class Saver:
             show_fixations=(True, True, False),
             scale=scale,
             dpi=dpi,
+            grayscale=bool(modality_results.get("grayscale", False)),
         )
 
 
@@ -513,13 +519,15 @@ class Saver:
         show_fixations: Sequence[bool] = (True, True, True),
         scale: float = 2.0,
         dpi: int = 250,
+        grayscale: bool = False,
     ) -> None:
         """
         2 x 2 figure: the stimulus with the fixations of img, then the three (title, data, kind)
         panels in reading order. kind "density" panels share one colour scale, so they are directly
         comparable; a "difference" panel gets its own symmetric scale. Densities are overlaid on the
         stimulus, with the fixations on the panels where show_fixations is True. Each panel is drawn
-        at `scale` output pixels per image pixel.
+        at `scale` output pixels per image pixel. With grayscale, the stimulus panel shows the
+        Loader.to_grayscale_rgb version of the image (cv2.COLOR_RGB2GRAY).
         """
         width, height = img.width, img.height
         extent = (0, width, height, 0)
@@ -529,6 +537,8 @@ class Saver:
         else:
             print(f"Stimulus not found ({image_path}); using a grey background.")
             stimulus = np.full((height, width), 128, dtype=np.uint8)
+        if grayscale:
+            stimulus = Loader.to_grayscale_rgb(stimulus)
         # Grey version under the density overlays, so their colours stay readable.
         stimulus_grey = stimulus[..., :3].mean(axis=2) if stimulus.ndim == 3 else stimulus
 

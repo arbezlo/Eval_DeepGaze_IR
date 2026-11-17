@@ -944,6 +944,7 @@ class Comparator:
         model: str = "IIE",
         msdb_dataset: int | None = None,
         centerbias_source: str = "gold",
+        grayscale: bool = False,
     ) -> dict[str, dict]:
         """
         Information gain explained (IGE) by DeepGaze on every image of both modalities,
@@ -972,6 +973,11 @@ class Comparator:
                         per degree of visual angle of each image, from the display geometry.
         msdb_dataset  : MSDB only. None for the parameters averaged over its training datasets,
                         or a deepgaze_pytorch.MSDBDataset index (see saliency.deepgaze.DeepGaze).
+        grayscale     : feed DeepGaze, for BOTH modalities, the grayscale version of the visible
+                        image (cv2.COLOR_RGB2GRAY, Loader.to_grayscale_rgb) instead of the stimulus of
+                        the modality: "VIS" is then IGE(DG(GRAY), GOLD(RGB)) and "IR" is
+                        IGE(DG(GRAY), GOLD(IR)). Each keeps the fixations, baseline, gold standard and
+                        DeepGaze prior of its own modality, so the two are reported separately.
 
         Returns {"VIS": ..., "IR": ...}, each with per-stem results under "images" and the dataset
         values: mean "explainable_ig_bits" and "model_ig_bits" over images and their ratio "ige"
@@ -999,6 +1005,9 @@ class Comparator:
             "VIS": self.index.normalize_modality("visible"),
             "IR": self.index.normalize_modality("infrared"),
         }
+        # Stimulus given to DeepGaze: the modality's own image, or the grayscale visible image.
+        stimulus_modality = {"VIS": "VIS", "IR": "VIS"} if grayscale else {"VIS": "VIS", "IR": "IR"}
+        stimulus_names = {"VIS": "RGB", "IR": "IR"}
 
         results = {}
         for modality in ("VIS", "IR"):
@@ -1012,7 +1021,8 @@ class Comparator:
             )
 
             per_image, log_densities, image_paths = {}, {}, {}
-            for stem in tqdm(list(gold["images"]), desc=f"Computing DeepGaze IGE ({modality})"):
+            stimulus_name = "GRAY" if grayscale else stimulus_names[modality]
+            for stem in tqdm(list(gold["images"]), desc=f"Computing DeepGaze IGE ({stimulus_name} vs gold {modality})"):
                 img = gold["fixations"][stem]
                 centerbias = gold["centerbiases"][stem]
                 gold_values = gold["images"][stem]
@@ -1028,8 +1038,12 @@ class Comparator:
                         "Recompute the gold standard on the current data."
                     )
 
-                image_id = self.index.get_id(stem, modality_names[modality])
-                image_path = image_dirs[modality] / self.index.get_name(image_id)
+                source = stimulus_modality[modality]
+                image_id = self.index.get_id(stem, modality_names[source])
+                image_path = image_dirs[source] / self.index.get_name(image_id)
+                image = self.loader.load_image(image_path)
+                if grayscale:
+                    image = self.loader.to_grayscale_rgb(image)
                 # Image pixels per degree of visual angle, as displayed during the experiment.
                 dims = data[modality][stem].dimensions_data
                 pixel_per_dva = self._compute_sigma(1.0, dims.stimuli_width, dims.image_width)
@@ -1040,7 +1054,7 @@ class Comparator:
                     else None
                 )
                 log_density = deepgaze.predict_log_density(
-                    self.loader.load_image(image_path), pixel_per_dva=pixel_per_dva, centerbias=prior
+                    image, pixel_per_dva=pixel_per_dva, centerbias=prior
                 )
 
                 model_ig = model_information_gain(img, log_density, centerbias)
@@ -1074,6 +1088,9 @@ class Comparator:
                 "msdb_dataset": msdb_dataset,
                 "centerbias_source": centerbias_source,
                 "centerbias_path": centerbias_paths[modality],
+                # Image given to DeepGaze: "RGB", "IR" or "GRAY" (grayscale visible image).
+                "stimulus": stimulus_name,
+                "grayscale": grayscale,
                 "explainable_ig_bits": explainable_ig_bits,
                 "naive_ig_bits": naive_ig_bits,
                 "model_ig_bits": model_ig_bits,
