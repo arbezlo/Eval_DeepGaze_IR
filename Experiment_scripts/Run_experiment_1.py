@@ -37,7 +37,7 @@ def main():
     expe1_results = comparator.run_expe1(
         infrared_df=infrared_df,
         visible_df=visible_df,
-        n_permutations=1000,
+        n_permutations=300,
         seed=131,
     )
 
